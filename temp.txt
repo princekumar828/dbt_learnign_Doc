@@ -1,0 +1,8 @@
+This is Expected Behavior: The most important takeaway from that link is that the error you saw is not a bug in your setup. It is the current, expected behavior of the Trino-Iceberg-Nessie integration.
+
+The Technical Reason: As the Trino developers and contributors in that thread explain, the Nessie catalog's primary purpose is to provide Git-like versioning for Iceberg tables. An Iceberg table has a physical presence—it's a collection of data files (Parquet) and metadata files that Nessie can track, version, and point to.
+
+A SQL VIEW, on the other hand, is just a logical object. It's a stored query string, not a set of physical files. The Nessie catalog protocol is not designed to store or version these kinds of logical objects.
+
+The Error is Correct: When you ask Trino to CREATE VIEW in a Nessie catalog, the Iceberg connector correctly reports that the operation is NOT_SUPPORTED.
+
