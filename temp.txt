@@ -6,3 +6,55 @@ A SQL VIEW, on the other hand, is just a logical object. It's a stored query str
 
 The Error is Correct: When you ask Trino to CREATE VIEW in a Nessie catalog, the Iceberg connector correctly reports that the operation is NOT_SUPPORTED.
 
+Designed modern lakehouse for scalable, version-controlled data analytics.
+
+Deployed Dockerized Iceberg lakehouse with MinIO, Nessie, Trino infrastructure.
+
+Executed complex data transformations within Iceberg using dbt Core.
+
+Built semantic layer foundation with dbt Core for clear business insights.
+
+Mastered Nessie data versioning, enhancing data reliability and collaborative development.
+
+
+Designed modern lakehouse & Oracle solutions for version-controlled data analytics.
+
+Deployed Dockerized Iceberg lakehouse; integrated dbt with Oracle database.
+
+Executed complex dbt transformations in Iceberg lakehouse & Oracle.
+
+Built semantic layer foundations with dbt Core for diverse data sources.
+
+Mastered Nessie versioning and dbt data modeling across platforms.
+
+Integrated dbt with Oracle & Iceberg lakehouse for modern analytics.
+
+Executed complex dbt data transformations across Oracle and Iceberg platforms.
+
+Developed semantic layers using dbt Core for both Oracle & lakehouse.
+
+Modeled data effectively with dbt for diverse query engines and architectures.
+
+Mastered dbt functionalities, enhancing data reliability and business insights.
+Integrated dbt with Oracle & Nessie-Iceberg lakehouse (Trino, DuckDB).
+
+Transformed data via dbt on Oracle, Trino/Nessie Iceberg, DuckDB.
+
+Developed semantic layers with dbt Core for Oracle & Nessie-Iceberg.
+
+Modeled data with dbt for diverse engines: Trino, DuckDB, Oracle.
+
+Mastered dbt, driving reliable insights across these data platforms.
+
+ntegrated dbt workflow: Oracle & Nessie-Iceberg lakehouse (Trino, DuckDB).
+
+Modularized data transformations using dbt: Oracle, Trino/Nessie Iceberg, DuckDB.
+
+Built dbt semantic layer: single truth for Oracle & Nessie-Iceberg insights.
+
+Versioned & tested data models with dbt: Trino, DuckDB, Oracle.
+
+Mastered dbt for documented, reliable analytics across diverse data platforms.
+Deployed, scheduled dbt runs; materialized transformations for reliable, actionable analytics.
+
+Real-World dbt: Transforming Data and Navigating Challenges in an Iceberg-Nessie Lakehouse" (New title reflecting practical dbt work and problem-solving)
