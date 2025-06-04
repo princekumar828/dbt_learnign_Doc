@@ -58,3 +58,398 @@ Mastered dbt for documented, reliable analytics across diverse data platforms.
 Deployed, scheduled dbt runs; materialized transformations for reliable, actionable analytics.
 
 Real-World dbt: Transforming Data and Navigating Challenges in an Iceberg-Nessie Lakehouse" (New title reflecting practical dbt work and problem-solving)
+
+
+
+https://g.co/gemini/share/38e2bca03c7e
+
+
+
+
+You're pointing to a very important aspect of the developer experience, and you're right to highlight the ease of use you had with Trino in that regard.
+
+Let's clarify how Trino achieves that "automatic" metadata creation and management with Nessie and Iceberg, and then discuss how we can get *as close as possible* to that experience if you were to use DuckDB with dbt for transformations, while still keeping Nessie and Iceberg.
+
+**How Trino Achieves "Automatic" Metadata & Nessie Integration:**
+
+When you use Trino with the `iceberg.catalog.type=nessie` configuration:
+
+1.  **Reading Data (e.g., `SELECT * FROM nessie.schema.table AT BRANCH 'dev';`)**
+    * You just provide the catalog (`nessie`), schema, table name, and optionally a Nessie branch.
+    * **Automatic Part:** Trino's specialized Iceberg/Nessie connector automatically communicates with the Nessie server. It asks Nessie, "What is the S3 path to the current Iceberg metadata file for `schema.table` on the `dev` branch?" Nessie responds with the path, and Trino then reads the data. You don't need to know or manage these S3 paths yourself.
+
+2.  **Writing Data (e.g., dbt runs `CREATE TABLE nessie.schema.new_model AS SELECT ...;`)**
+    * dbt (via Trino) executes a command to create a new table or overwrite an existing one.
+    * **Automatic Part:**
+        * Trino writes the actual data files (Parquet) to MinIO.
+        * Trino creates the necessary Apache Iceberg metadata files (e.g., `v1.metadata.json`, manifest lists, manifest files) in MinIO.
+        * Crucially, Trino then makes an **API call to the Nessie server**. It tells Nessie, "I've just created/updated `schema.new_model`. Its new state is pointed to by this metadata file: `s3://.../v1.metadata.json`. Please commit this change to the `dev` branch (or whichever branch is active for this session)."
+        * Nessie records this commit, updating its internal pointers for that branch.
+
+This seamless, automatic interaction with Nessie for both reads and writes is possible because Trino has a **dedicated, Nessie-aware Iceberg catalog connector**.
+
+**How to Get "That" (or Close to It) with DuckDB + dbt (Keeping Nessie & Iceberg):**
+
+DuckDB's current Iceberg extension is excellent for reading and writing the Iceberg *table format*, but it **does not have a built-in, Nessie-aware catalog connector** like Trino does. This means DuckDB itself won't automatically talk to Nessie to resolve branches or commit changes.
+
+To achieve a similar outcome, we need to add steps around your `dbt run` when using DuckDB:
+
+1.  **Reading Source Data (Making it "Feel" Automatic in dbt):**
+    * **Challenge:** DuckDB's `iceberg_scan()` needs an explicit S3 path to an Iceberg metadata file. It can't just take `nessie.schema.table AT BRANCH 'dev'`.
+    * **Solution (Requires Custom dbt Work):**
+        * You would need to create a **dbt macro**. This macro, when dbt parses your project, would:
+            * Execute a small Python script (using the Nessie Python client library).
+            * This script would connect to your Nessie server, ask for the S3 path to the metadata file for your source table on the desired Nessie branch (which could be dynamically determined from your dbt target).
+            * The macro would then return this S3 path.
+        * In your dbt models, instead of `{{ source(...) }}`, you'd use your custom macro:
+            ```sql
+            -- models/staging/stg_customers.sql
+            select * from iceberg_scan( {{ get_nessie_iceberg_path('raw_customers', var('target_nessie_branch')) }} )
+            ```
+        * This makes reading *feel* more automatic from the model author's perspective, but there's custom logic behind the scenes.
+
+2.  **Writing Data & Committing to Nessie (Materializing dbt Models):**
+    * **DuckDB's Part:** When dbt tells DuckDB to create a table (e.g., `fct_orders`), DuckDB will:
+        * Write the Parquet data files to a specified S3 path in MinIO.
+        * Create the Iceberg metadata files for this new table in that S3 path.
+    * **The Missing Automatic Part:** DuckDB will *not* tell Nessie about this new table or its metadata. Nessie will be unaware of the tables dbt just created.
+    * **Solution (Requires Post-dbt Run Steps):**
+        * After your `dbt run` successfully completes, you need a separate script or process that:
+            * Knows which tables dbt just created/updated and where their Iceberg metadata files are in MinIO.
+            * Uses the Nessie CLI or Nessie Python client library to connect to your Nessie server.
+            * For each dbt model materialized, it would perform a Nessie "put" or "commit" operation, telling Nessie to create or update its pointer for that table on the target Nessie branch to point to the new Iceberg metadata file in S3.
+        * This could be a Python script you run after `dbt run`, or integrated into `on-run-end` hooks in dbt (though complex operations in hooks can be tricky).
+
+**In Summary:**
+
+* **Trino:** Provides a built-in, seamless, and automatic integration with Nessie for both reading versioned tables and committing new/updated tables. This is due to its specialized Nessie-aware Iceberg connector.
+* **DuckDB (with Nessie):**
+    * Can read/write the Iceberg table format perfectly.
+    * **Lacks the automatic Nessie catalog integration.**
+    * To achieve a similar end-to-end versioned workflow with dbt:
+        * Reading versioned sources requires custom dbt macros to resolve Nessie paths.
+        * Committing dbt-created tables into Nessie requires an explicit step after `dbt run` using Nessie's API/CLI.
+
+So, while you can use DuckDB as the engine for dbt transformations on Iceberg data, the "automatic" metadata creation and versioning with Nessie that you experienced with Trino requires additional custom development or manual steps to bridge the gap. It's a trade-off between Trino's deeper integration and DuckDB's speed and simplicity for the transformation step itself.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Okay, I understand your goal: you want to **keep your existing data lakehouse foundation (MinIO for storage, Iceberg as the table format, and Nessie for cataloging and version control)** but you want to **replace Trino with DuckDB as the query engine that dbt uses for transformations.**
+
+This is an interesting architectural choice. Let's break down how this would work and what the implications are.
+
+### How This Would Work (Conceptually)
+
+1.  **Nessie Still Manages Versions:**
+    * Nessie remains the "source of truth" for what your data looks like on different branches (`main`, `dev_your_user`, etc.).
+    * When you make a commit to Nessie (e.g., after Spark ingestion, or after a dbt run that creates new tables), Nessie updates its pointers to the specific Iceberg metadata files in MinIO that represent the state of your tables on that branch/commit.
+
+2.  **dbt + DuckDB for Transformations:**
+    * Your dbt project will use the `dbt-duckdb` adapter.
+    * DuckDB will be the engine executing the SQL generated by dbt.
+
+3.  **The "Bridge" - How DuckDB Finds Nessie-Versioned Data:**
+    * This is the crucial part. DuckDB itself does not have a native "Nessie catalog connector" that understands how to resolve `nessie_ref` or talk to the Nessie API to get branch-specific table locations.
+    * Therefore, when your dbt models (via DuckDB) need to read a source Iceberg table that's managed by Nessie, you can't just say `SELECT * FROM my_table_on_main_branch`.
+    * Instead, your dbt models (or macros within dbt) would need to be constructed in a way that DuckDB is given the **explicit S3 path to the specific Iceberg metadata file (`*.metadata.json`) that corresponds to the table's state on the desired Nessie branch.**
+
+### Practical Steps & Implications
+
+**Step 1: dbt Profile for DuckDB (`profiles.yml`)**
+This would be configured for S3 access to MinIO, as we discussed previously. It will *not* have a `nessie_ref` property.
+
+```yaml
+# ~/.dbt/profiles.yml
+my_lakehouse_dbt_project:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: dbt_duckdb.db 
+      extensions:
+        - 'httpfs'
+        - 'iceberg'
+      settings:
+        s3_endpoint: 'localhost:9000'
+        s3_url_style: 'path'
+        s3_use_ssl: false
+        s3_access_key_id: 'minio'
+        s3_secret_access_key: 'minio123'
+```
+
+**Step 2: Referencing Source Tables in dbt Models**
+This is where it gets more complex than with the `dbt-trino` adapter.
+
+* **Option A (Manual Path Management - Not Ideal):** For each source table, you would need to:
+    1.  Use the Nessie CLI or a script with the Nessie Python client to find the S3 path to the current `metadata.json` file for that table on your desired Nessie branch (e.g., `main` or `dev_your_user`).
+    2.  Hardcode or pass this full S3 path into DuckDB's `iceberg_scan()` function in your dbt model.
+        ```sql
+        -- models/staging/stg_customers.sql
+        select * from iceberg_scan('s3://lakehouse/warehouse/raw_data/customers/metadata/vXXX.metadata.json')
+        ```
+    This is brittle because the metadata file path changes with every commit.
+
+* **Option B (dbt Macro to Resolve Nessie Path - Advanced):**
+    1.  You could write a sophisticated dbt macro. This macro would:
+        * Take a table name and a Nessie branch name as input.
+        * During dbt's parsing/compilation phase, it would execute a Python script (using `run_on_parse` or similar techniques, or by calling an external script).
+        * This Python script would use the Nessie client library to connect to your Nessie server and get the S3 path to the latest metadata file for the given table on the given branch.
+        * The macro would then return this path, which you could use in `iceberg_scan()`.
+    2.  This is powerful but adds significant custom development to your dbt project.
+
+**Step 3: Writing Transformed Tables with dbt + DuckDB**
+* When dbt (via DuckDB) creates new tables (e.g., your mart models), DuckDB will write them as new Iceberg tables directly to a specified S3 path in MinIO (e.g., `s3://lakehouse/warehouse/analytics_dev_your_user/fct_orders`).
+* These new tables are **not automatically known to Nessie yet.**
+
+**Step 4: Committing dbt Outputs to Nessie**
+* After your `dbt run` completes and DuckDB has written the new Iceberg tables to MinIO, you would need a separate step using the Nessie CLI or API to:
+    1.  Tell Nessie about these new tables (or updated tables if you're overwriting).
+    2.  Commit these changes to the desired Nessie branch (e.g., `dev_your_user` or `main`).
+
+### Summary of Implications:
+
+* **Data Versioning is Decoupled:** Nessie still versions your data, but the dbt + DuckDB transformation step is not directly "Nessie-aware" during its execution. You manage the interaction with Nessie branches more explicitly before and after the `dbt run`.
+* **Increased Complexity in dbt Models:** Reading source tables requires getting specific metadata paths, which is less straightforward than `dbt-trino`'s `nessie_ref`.
+* **Manual Nessie Commits:** You'll need an explicit step to commit the tables created/updated by dbt into Nessie.
+* **Loss of Seamless Branching in dbt:** The simple `dbt run --target dev` (which automatically uses `nessie_ref: dev_branch`) workflow is gone. You'd need to manage which Nessie branch's data paths are fed into your dbt models.
+
+**Is it possible?** Yes, technically.
+**Is it as integrated and easy as using `dbt-trino` with `nessie_ref`?** No, definitely not.
+
+You'd be using Nessie as a powerful "pointer management" system for your Iceberg table versions, and DuckDB as a fast engine to process specific versions of those tables. The "glue" to make them work together within a dbt workflow would require more custom scripting or advanced dbt macros.
+
+For a simpler experience where dbt natively understands Nessie branches, sticking with `dbt-trino` (or `dbt-spark` if you were using Spark for transformations) is generally recommended.
+
+What are your thoughts on this level of integration, now that it's Wednesday morning in Chennai?
+
+
+
+
+
+
+
+
+
+
+
+Yes, Nessie itself can be replaced in your lakehouse architecture. Nessie plays two primary roles:
+
+1.  **Iceberg Catalog:** It tells your query engines (like Trino) where to find the metadata for your Iceberg tables (which version of the table, which files to read, etc.).
+2.  **Data Version Control ("Git for Data"):** This is Nessie's standout feature. It allows you to manage your entire data lakehouse with Git-like semantics: branches, commits, merges, and tags. This provides transactional consistency across multiple tables and enables isolated development.
+
+When you talk about replacing Nessie, you're looking for alternatives for one or both of these roles.
+
+Here are the main alternatives and their implications:
+
+### 1. Replacing Nessie with Another Iceberg Catalog (Losing "Git for Data")
+
+If you want to keep Iceberg tables but don't need Nessie's specific Git-like, cross-table versioning features, you can use other Iceberg-compatible catalogs. Your query engine (Trino or DuckDB, if configured correctly) would then talk to this new catalog.
+
+* **Apache Hive Metastore (HMS):**
+    * **What it is:** The traditional, most widely used catalog in the Hadoop and data lake ecosystem. It can store metadata for Iceberg tables.
+    * **Implications:**
+        * You would run Hive Metastore (often with a backing database like PostgreSQL) as a service in your Docker setup.
+        * Trino and Spark have excellent support for using HMS as an Iceberg catalog.
+        * dbt would connect to Trino, which would use HMS.
+        * **You lose Nessie's branching, atomic multi-table commits, and easy merging features.** Iceberg itself still provides table-level time travel (querying past snapshots of a single table), but the catalog-level versioning is gone.
+        * This setup is very stable and widely understood. It supports views.
+
+* **AWS Glue Data Catalog:**
+    * **What it is:** A fully managed catalog service by AWS. If your MinIO was actually S3 on AWS, this would be a natural fit.
+    * **Implications:** Similar to HMS in terms of features for Iceberg (supports tables and views, but no Nessie-style branching). It simplifies infrastructure management if you're in the AWS cloud. For a local Docker setup, HMS is more common.
+
+* **Other Iceberg REST Catalog Implementations:**
+    * **What it is:** Nessie is one implementation of the open Iceberg REST Catalog protocol. Other (less common or specialized) implementations might exist.
+    * **Implications:** You'd be looking for a different server that speaks the Iceberg REST Catalog language. The features would depend on that specific implementation.
+
+* **JDBC Catalog (for Iceberg):**
+    * **What it is:** Iceberg metadata can be stored in a relational database using a JDBC connection.
+    * **Implications:** Simpler than HMS for some setups, but might have performance limitations for very large numbers of tables/partitions. Again, no Nessie-style branching.
+
+* **File-Based / Hadoop Catalog (for Iceberg):**
+    * **What it is:** The simplest form, where Iceberg metadata is just stored in the file system (MinIO in your case) alongside the data.
+    * **Implications:** Very limited, not suitable for concurrent operations or easy discovery. Generally only for single-user testing. No Nessie-style branching.
+
+### 2. Replacing Nessie with Another Data Versioning Solution (Very Different Architecture)
+
+If the "Git for Data" aspect is crucial, but you want an alternative to Nessie, you might look at tools that provide versioning at a different layer:
+
+* **lakeFS:**
+    * **What it is:** An open-source platform that provides Git-like versioning for data lakes, but it works at the **object storage layer** (it versions your S3/MinIO buckets and prefixes), not just as an Iceberg catalog. It can work *with* Iceberg.
+    * **Implications:** This is a significant architectural shift. lakeFS would sit between your compute engines and MinIO, managing versions of all your data files. You'd still need an Iceberg catalog (like HMS or Glue) on top of the lakeFS-versioned storage.
+
+### Summary of Implications for Your dbt Transformations:
+
+* **If you replace Nessie with HMS or Glue (or another non-Nessie Iceberg catalog):**
+    * Your `dbt-trino` adapter would connect to Trino, and Trino would be configured to use the new catalog.
+    * The `nessie_ref` property in your dbt profiles would become irrelevant.
+    * You would **gain the ability to create views** directly with Trino, so you could change your dbt staging models from `ephemeral` back to `view` if desired.
+    * You **lose the ability to run dbt transformations on isolated Nessie data branches.** Your dbt `dev` and `prod` targets would likely point to different schemas in the same (unbranched) catalog.
+
+* **If you use DuckDB directly with Iceberg tables on MinIO (and no central catalog like Nessie/HMS):**
+    * dbt (via DuckDB) would read/write Iceberg tables by pointing to their S3 paths.
+    * You lose central cataloging and Nessie's versioning. Iceberg's table-level time travel is still available.
+
+**The main trade-off when replacing Nessie is usually giving up its unique multi-table, Git-like branching and transactional capabilities in exchange for simplicity or compatibility with other catalog features (like native view support in HMS).**
+
+What are your main reasons for wanting to replace Nessie? Knowing that would help narrow down the best alternatives for your specific needs this Wednesday morning in Chennai.
+
+
+
+
+
+
+
+
+
+You're asking for a deeper dive into the **Iceberg REST Catalog**, and that's a great question because it's a fundamental concept for understanding how modern data lakehouse components can work together flexibly.
+
+Think of it like this:
+
+1.  **The Problem:** Apache Iceberg is just a table format. It defines how your data and metadata files should be structured in storage (like MinIO/S3). But query engines (like Trino, Spark, Flink, etc.) need a way to *find* the current metadata for any given table. Where is the latest `version-x.metadata.json` file that tells me which data files make up the table `mydb.mytable`? This "lookup" service is what an Iceberg Catalog does.
+
+2.  **Many Possible Catalogs:** There are many ways to implement this catalog service:
+    * You could use a Hive Metastore.
+    * You could use AWS Glue Data Catalog.
+    * You could store pointers in a JDBC database.
+    * You could use Nessie.
+    * You could build your own custom catalog service.
+
+3.  **The Need for a Common Language:** If every query engine had to write custom code to talk to every different type of catalog, it would be a nightmare of incompatibility.
+
+4.  **The Solution: The Iceberg REST Catalog Protocol:**
+    * The Apache Iceberg community defined a **standardized API protocol** for how query engines should interact with an Iceberg catalog.
+    * "REST" (Representational State Transfer) simply means this API uses standard web technologies: HTTP requests (like `GET`, `POST`, `DELETE`) and URLs.
+    * This protocol specifies exactly what API calls a catalog must support. For example:
+        * `GET /v1/namespaces/{namespace}/tables/{table}`: To get information about a table.
+        * `POST /v1/namespaces/{namespace}/tables`: To create a new table.
+        * `POST /v1/tables/{namespace}.{table}/commit`: To commit changes to a table (i.e., update its metadata pointer).
+        * And many others for listing tables, namespaces, loading table metadata, etc.
+
+5.  **What it Means to be an "Iceberg REST Catalog":**
+    * Any piece of software (like Nessie, or a future product) that correctly implements all the API endpoints defined in this REST Catalog protocol can call itself an "Iceberg REST Catalog."
+    * Query engines (like Trino or Spark) can then be configured with a generic "REST Catalog Connector." You just tell the engine the base URL of the REST Catalog server, and the engine knows how to make the standard API calls to list tables, load metadata, commit transactions, etc.
+
+6.  **Nessie and the REST Catalog:**
+    * **Nessie is an implementation of the Iceberg REST Catalog protocol.** This means Nessie exposes all the standard REST API endpoints that Trino or Spark expect. This is why you can configure Trino with `iceberg.catalog.type = rest` and point it to your Nessie server's REST API endpoint (usually something like `http://nessie:19120/api/v1/` or a similar path specified by Nessie for its REST-compliant interface).
+    * **Nessie also adds more:** On top of implementing the standard REST protocol for basic table operations, Nessie adds its own unique API endpoints (often under a `/v2/` path or specific Nessie paths) to handle its Git-like features (branches, tags, commits, merging, diffing, etc.). When you use Trino with `iceberg.catalog.type = nessie`, Trino's connector is using these extended Nessie-specific APIs in addition to the basic REST ones.
+
+**Benefits of the REST Catalog Standard:**
+
+* **Interoperability:** Different query engines can work with different catalog backends as long as they all speak the "REST Catalog" language.
+* **Flexibility:** You can swap out catalog implementations without having to change your query engines (as long as the new catalog also implements the REST protocol).
+* **Openness:** It encourages a healthy ecosystem of tools.
+
+So, when someone says "Nessie can be used as a REST catalog," they mean that Nessie correctly implements the standard API defined by the Iceberg REST Catalog protocol, making it compatible with generic REST catalog clients in query engines, while also offering its own advanced versioning features through its more specialized APIs.
+
+It's a key piece of the "pluggable" nature of the modern data lakehouse.
+
+
+
+
+
+
+Okay, you want to know how to practically use or configure an Iceberg REST Catalog, especially in the context of your existing Nessie server. This is a good way to understand the different layers of the Iceberg ecosystem.
+
+Essentially, using Nessie "as a REST Catalog" means configuring your query engine (Trino in our case) to communicate with Nessie using only the **standardized Iceberg REST Catalog API protocol**, rather than Trino's specialized Nessie-aware connector mode.
+
+Here's how you would typically configure Trino to do this:
+
+### Understanding the Difference
+
+* **When you use `iceberg.catalog.type = nessie` (our current setup):** Trino uses a specialized connector that understands all of Nessie's extended features, including branches, tags, commits, and specific `CALL` procedures. It communicates with Nessie's richer API (often v2).
+* **When you use `iceberg.catalog.type = rest`:** Trino uses a more generic Iceberg connector that expects to talk to *any* catalog server implementing the standard Iceberg REST Catalog API (often v1). It will not use or understand Nessie-specific extensions like branching commands directly in SQL.
+
+### Configuration Steps for Trino
+
+You would modify your Trino catalog properties file (e.g., `trino_config/catalog/nessie.properties`) to switch to the generic REST mode.
+
+1.  **Edit `nessie.properties`:**
+    Open your `trino_config/catalog/nessie.properties` file. You'll change a few key lines.
+
+    **Original (Specialized Nessie Mode):**
+    ```properties
+    connector.name=iceberg
+    iceberg.catalog.type=nessie
+    nessie.uri=http://nessie:19120/api/v2
+    nessie.ref=main
+    # ... S3 configurations for MinIO ...
+    hive.s3.aws-access-key=minio
+    hive.s3.aws-secret-key=minio123
+    hive.s3.endpoint=http://minio:9000
+    hive.s3.path-style-access=true
+    ```
+
+    **Modified for Generic REST Mode (Still pointing to your Nessie Server):**
+    ```properties
+    connector.name=iceberg
+    # --- Key Change: Switch catalog type ---
+    iceberg.catalog.type=rest 
+    
+    # --- URI for the REST catalog server ---
+    # Nessie's API endpoint usually serves the v1 REST spec at its base or a /v1 path.
+    # For Nessie, its primary API endpoint can often be used here as well.
+    # The behavior change comes from the 'type=rest'.
+    iceberg.rest.uri=http://nessie:19120/api/v1 
+    # Note: Depending on the Nessie version and its exact REST API structure,
+    # you might just use http://nessie:19120/api/v2 if it also serves v1 requests,
+    # or a specific v1 path if provided by Nessie documentation.
+    # The key is that Trino will now use standard REST calls.
+
+    # --- The 'nessie.ref' property is NOT understood by the generic REST connector ---
+    # # nessie.ref=main  <-- This will likely be ignored or cause an error in 'rest' mode.
+                         # The REST catalog will typically use the server's default reference/branch.
+
+    # --- S3 configurations remain the same, as Trino still needs to access data files ---
+    hive.s3.aws-access-key=minio
+    hive.s3.aws-secret-key=minio123
+    hive.s3.endpoint=http://minio:9000
+    hive.s3.path-style-access=true
+    ```
+
+2.  **Restart Trino:**
+    For these changes to take effect, you must restart your Trino container:
+    ```bash
+    docker-compose restart trino
+    ```
+    Wait for it to come back online.
+
+### How to Use It and What to Expect
+
+* **Querying Tables:** You can still query your Iceberg tables. If you kept the filename `nessie.properties`, your catalog in Trino is still named `nessie`.
+    ```sql
+    -- In Trino CLI
+    SELECT * FROM nessie.raw_data.users;
+    ```
+* **Branching/Nessie Features in SQL - LIKELY GONE:**
+    * The SQL syntax specific to Nessie, like `AT BRANCH "branch_name"` or `CALL nessie.system.create_branch(...)`, will **most likely not work**.
+    * The generic `rest` connector in Trino does not understand these Nessie-specific extensions. It only knows how to make standard Iceberg REST API calls (like "load table," "commit table metadata").
+    * You would be interacting with whatever default branch your Nessie server presents to a standard v1 REST client.
+
+### Why Would You Configure It This Way?
+
+1.  **Connecting to a Non-Nessie REST Catalog:** If you had another Iceberg catalog product that *only* supported the standard REST protocol and wasn't Nessie, this is how you'd connect to it.
+2.  **Interoperability Testing:** To ensure a tool or setup is compliant with the basic Iceberg REST specification, without relying on vendor-specific extensions.
+3.  **Exploring Connector Behavior:** As you are doing, to understand the differences in how the connector behaves.
+
+### Recommendation for Your Current Setup
+
+Given that you specifically chose Nessie for its "Git-for-Data" versioning capabilities (branches, commits, merges):
+
+* Using `iceberg.catalog.type = nessie` in your Trino configuration is generally the **recommended approach**. This specialized mode unlocks all of Nessie's powerful features directly within Trino SQL.
+* Switching to `iceberg.catalog.type = rest` while still pointing to your Nessie server would essentially treat Nessie as a simpler, non-version-aware catalog from Trino's perspective. You would lose direct SQL access to its branching features, which defeats much of the purpose of using Nessie.
+
+The idea you found ("creating views in that path. Not as catalog type Nessie but as catalog type REST") was likely an exploration of whether Trino's generic REST connector had a different behavior for views. However, as we concluded, the limitation for views often also lies with the Nessie backend not having a way to store them.
+
+This is a good exploration for your understanding this Wednesday morning in Chennai. If you want full Nessie functionality within Trino, the `iceberg.catalog.type=nessie` is the way to go.
