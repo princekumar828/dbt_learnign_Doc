@@ -749,3 +749,215 @@ This local setup provides a robust foundation for your batch ETL pipeline using 
 
 ⸻
 
+
+
+
+
+
+
+
+3333333333333333333333
+
+
+Here’s a complete step-by-step guide to set up a local SQLMesh + Trino + Iceberg (with Nessie + MinIO) ETL project using Docker:
+
+⸻
+
+🧱 Step 1: Directory Structure
+
+Create a project directory:
+
+mkdir sqlmesh-lakehouse
+cd sqlmesh-lakehouse
+
+Create these folders/files inside:
+
+sqlmesh-lakehouse/
+├── docker-compose.yml
+├── trino/
+│   └── etc/
+│       └── catalog/
+│           └── nessie.properties
+├── sqlmesh.yaml
+└── models/
+    ├── raw_users.sql
+    └── user_summary.sql
+
+
+⸻
+
+📦 Step 2: docker-compose.yml
+
+Paste the following into docker-compose.yml:
+
+version: '3.8'
+
+services:
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+
+  nessie:
+    image: projectnessie/nessie
+    ports:
+      - "19120:19120"
+
+  postgres:
+    image: postgres
+    restart: always
+    environment:
+      POSTGRES_USER: sqlmesh
+      POSTGRES_PASSWORD: sqlmesh
+      POSTGRES_DB: sqlmesh
+    ports:
+      - "5432:5432"
+
+  trino:
+    image: trinodb/trino:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/etc:/etc/trino
+    depends_on:
+      - minio
+      - nessie
+
+volumes:
+  minio_data:
+
+
+⸻
+
+⚙️ Step 3: Trino Iceberg + Nessie Catalog Config
+
+Create file trino/etc/catalog/nessie.properties:
+
+connector.name=iceberg
+iceberg.catalog.type=nessie
+iceberg.nessie.uri=http://nessie:19120/api/v1
+iceberg.nessie.ref=main
+iceberg.nessie.auth.type=NONE
+
+iceberg.file-format=parquet
+iceberg.catalog.warehouse=s3a://lakehouse/
+iceberg.s3.endpoint=http://minio:9000
+iceberg.s3.aws-access-key=minioadmin
+iceberg.s3.aws-secret-key=minioadmin
+iceberg.s3.path-style-access=true
+iceberg.s3.ssl.enabled=false
+
+
+⸻
+
+🧰 Step 4: SQLMesh Config
+
+Create sqlmesh.yaml:
+
+gateways:
+  trino:
+    connection:
+      type: trino
+      host: localhost
+      port: 8080
+      user: sqlmesh_user
+      catalog: nessie
+      schema: default
+    state_connection:
+      type: postgres
+      host: localhost
+      port: 5432
+      user: sqlmesh
+      password: sqlmesh
+      database: sqlmesh
+
+
+⸻
+
+📁 Step 5: SQLMesh Models
+
+✅ models/raw_users.sql
+
+CREATE MODEL raw_users
+KIND SEED
+COLUMNS (
+  user_id INT,
+  name STRING,
+  signup_ts TIMESTAMP
+)
+;
+
+INSERT INTO raw_users (user_id, name, signup_ts) VALUES
+(1, 'Alice', '2023-01-01 10:00:00'),
+(2, 'Bob', '2023-02-01 11:00:00'),
+(3, 'Charlie', '2023-03-01 12:00:00');
+
+✅ models/user_summary.sql
+
+MODEL (
+  name user_summary,
+  kind FULL,
+  dialect trino
+)
+
+SELECT
+  user_id,
+  name,
+  YEAR(signup_ts) AS signup_year
+FROM raw_users
+WHERE name IS NOT NULL;
+
+
+⸻
+
+🚀 Step 6: Run and Apply
+
+Start everything:
+
+docker-compose up -d
+
+Open MinIO UI:
+
+Go to http://localhost:9001
+Login: minioadmin / minioadmin
+Create a bucket named: lakehouse
+
+Install SQLMesh (if not already):
+
+pip install sqlmesh[trino]
+
+Run your first plan and apply:
+
+sqlmesh plan --gateway trino
+sqlmesh apply --gateway trino
+
+You should see SQLMesh creating Iceberg tables in your MinIO-backed lakehouse.
+
+⸻
+
+🧪 Step 7: Test in Trino UI
+
+Go to http://localhost:8080
+Catalog: nessie, Schema: default
+
+Run:
+
+SELECT * FROM default.user_summary;
+
+
+⸻
+
+✅ You’re done!
+
+Let me know if you’d like:
+	•	A sample sqlmesh.db file with data
+	•	dbt comparison
+	•	How to sync from OLTP DB like Oracle into this setup
+
