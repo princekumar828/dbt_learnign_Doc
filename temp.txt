@@ -453,3 +453,299 @@ Given that you specifically chose Nessie for its "Git-for-Data" versioning capab
 The idea you found ("creating views in that path. Not as catalog type Nessie but as catalog type REST") was likely an exploration of whether Trino's generic REST connector had a different behavior for views. However, as we concluded, the limitation for views often also lies with the Nessie backend not having a way to store them.
 
 This is a good exploration for your understanding this Wednesday morning in Chennai. If you want full Nessie functionality within Trino, the `iceberg.catalog.type=nessie` is the way to go.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-------------
+
+
+
+
+To set up a local environment using Trino with Apache Iceberg and Nessie as the catalog, follow these steps. This setup will allow you to perform batch transformations and materialize flat tables into your Iceberg lakehouse.
+
+⸻
+
+🧰 Prerequisites
+	•	Docker and Docker Compose installed.
+	•	Python 3.8+ with pip for installing SQLMesh.
+	•	Basic understanding of Docker and SQL.
+
+⸻
+
+🧱 Step 1: Set Up the Docker Environment
+
+We’ll use Docker Compose to orchestrate the following services:
+	•	Trino: Query engine.
+	•	PostgreSQL: Simulates the Oracle OLTP database.
+	•	MinIO: S3-compatible storage for Iceberg tables.
+	•	Nessie: Catalog for versioning and managing Iceberg tables. ￼ ￼
+
+Create a docker-compose.yml file with the following content:
+
+version: '3.8'
+
+services:
+  trino:
+    image: trinodb/trino:latest
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./trino/etc/catalog:/etc/trino/catalog
+    depends_on:
+      - postgres
+      - minio
+      - nessie
+    networks:
+      - trino-network
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: oracle_user
+      POSTGRES_PASSWORD: oracle_pass
+      POSTGRES_DB: oracle_db
+    ports:
+      - "5432:5432"
+    networks:
+      - trino-network
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    networks:
+      - trino-network
+
+  nessie:
+    image: ghcr.io/projectnessie/nessie:latest
+    ports:
+      - "19120:19120"
+    environment:
+      - nessie.version.store.type=IN_MEMORY
+      - nessie.catalog.default-warehouse=warehouse
+      - nessie.catalog.warehouses.warehouse.location=s3://my-bucket/
+      - nessie.catalog.service.s3.default-options.endpoint=http://minio:9000/
+    networks:
+      - trino-network
+
+networks:
+  trino-network:
+    driver: bridge
+
+volumes:
+  minio-data:
+
+This setup creates a networked environment where Trino can communicate with PostgreSQL, MinIO, and Nessie.
+
+⸻
+
+⚙️ Step 2: Configure Trino Catalogs
+
+Create the following directory structure for Trino’s catalog configurations:
+
+mkdir -p trino/etc/catalog
+
+2.1 PostgreSQL Catalog (Simulating Oracle)
+
+Create trino/etc/catalog/postgres.properties with:
+
+connector.name=postgresql
+connection-url=jdbc:postgresql://postgres:5432/oracle_db
+connection-user=oracle_user
+connection-password=oracle_pass
+
+2.2 Nessie Catalog
+
+Create trino/etc/catalog/nessie.properties with:
+
+connector.name=iceberg
+iceberg.catalog.type=nessie
+iceberg.nessie-catalog.uri=http://nessie:19120/api/v1
+iceberg.nessie-catalog.ref=main
+iceberg.nessie-catalog.default-warehouse-dir=s3://my-bucket/
+fs.native-s3.enabled=true
+s3.endpoint=http://minio:9000
+s3.path-style-access=true
+s3.aws-access-key=minioadmin
+s3.aws-secret-key=minioadmin
+
+Ensure that the iceberg.nessie-catalog.uri points to the correct Nessie API endpoint. ￼
+
+⸻
+
+🚀 Step 3: Launch the Environment
+
+Start all services using Docker Compose:
+
+docker-compose up -d
+
+Verify that all containers are running:
+
+docker-compose ps
+
+You should see all services with a status of “Up”.
+
+⸻
+
+🧪 Step 4: Initialize the PostgreSQL Database
+
+We’ll create sample tables in PostgreSQL to simulate your Oracle OLTP database.
+	1.	Access the PostgreSQL container:
+
+docker exec -it <postgres_container_name> psql -U oracle_user -d oracle_db
+
+Replace <postgres_container_name> with the actual container name, which you can find using docker ps.
+
+	2.	Create sample tables:
+
+CREATE TABLE users (
+    user_id SERIAL PRIMARY KEY,
+    name VARCHAR(100),
+    signup_ts TIMESTAMP
+);
+
+INSERT INTO users (name, signup_ts) VALUES
+('Alice', NOW()),
+('Bob', NOW());
+
+
+
+This sets up a simple users table with sample data.
+
+⸻
+
+🛠️ Step 5: Install and Configure SQLMesh
+
+Install SQLMesh in a Python virtual environment:
+
+python3 -m venv sqlmesh-env
+source sqlmesh-env/bin/activate
+pip install sqlmesh
+
+Initialize a new SQLMesh project:
+
+sqlmesh init my_project
+cd my_project
+
+Configure the sqlmesh.yaml file to use Trino:
+
+gateways:
+  trino:
+    connection:
+      type: trino
+      host: localhost
+      port: 8080
+      user: trino
+    state_connection:
+      type: duckdb
+
+This configuration tells SQLMesh to use Trino as the execution engine and DuckDB for state management.
+
+⸻
+
+🧩 Step 6: Define SQLMesh Models
+
+6.1 Source Model (Reading from PostgreSQL)
+
+Create a file models/raw_users.sql with:
+
+CREATE EXTERNAL MODEL my_project.raw_users
+KIND EXTERNAL
+COLUMNS (user_id INT, name STRING, signup_ts TIMESTAMP)
+AS (
+  SELECT user_id, name, signup_ts
+  FROM postgres.oracle_db.public.users
+);
+
+6.2 Transformation Model (Writing to Iceberg via Nessie)
+
+Create a file models/user_summary.sql with:
+
+MODEL (
+  name my_project.user_summary,
+  kind FULL,
+  dialect trino,
+  audits (not_null(columns=[user_id])),
+  physical_properties (
+    format = 'ICEBERG',
+    catalog = 'nessie'
+  )
+);
+
+SELECT
+  user_id,
+  name,
+  YEAR(signup_ts) AS signup_year
+FROM my_project.raw_users
+WHERE name IS NOT NULL;
+
+These models define the data flow from PostgreSQL to Iceberg via Trino and Nessie.
+
+⸻
+
+✅ Step 7: Execute the ETL Pipeline
+	1.	Plan the changes:
+
+sqlmesh plan
+
+
+	2.	Apply the plan:
+
+sqlmesh apply
+
+
+
+SQLMesh will orchestrate Trino to read from PostgreSQL and write the transformed data into Iceberg tables managed by Nessie.
+
+⸻
+
+🔍 Step 8: Verify the Results
+
+Access the Trino CLI:
+
+docker exec -it <trino_container_name> trino
+
+Run the following query to verify the data in the Iceberg table:
+
+SELECT * FROM nessie.default.user_summary;
+
+You should see the transformed data reflecting the batch ETL process.
+
+⸻
+
+🚀 Next Steps
+
+Once you’ve validated the setup locally:
+	•	Replace PostgreSQL with your actual Oracle database in the Trino catalog configuration.
+	•	Ensure network connectivity and proper authentication between Trino and Oracle.
+	•	Deploy the Docker Compose setup in your production environment, adjusting configurations as needed.
+
+This local setup provides a robust foundation for your batch ETL pipeline using Trino, SQLMesh, Apache Iceberg, and Nessie.
+
+⸻
+
