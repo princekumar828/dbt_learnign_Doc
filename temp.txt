@@ -961,3 +961,124 @@ Let me know if you’d like:
 	•	dbt comparison
 	•	How to sync from OLTP DB like Oracle into this setup
 
+
+Certainly! To set up a SQLMesh project that reads data from a PostgreSQL table, performs transformations, and materializes the results into an Apache Iceberg table using Trino and Nessie, follow the steps below. This setup leverages SQLMesh’s capabilities to manage data transformations effectively.
+
+⸻
+
+🗂️ Project Structure
+
+sqlmesh_project/
+├── config.yaml
+├── models/
+│   ├── source_orders.sql
+│   └── transformed_orders.sql
+└── snapshots/
+
+
+⸻
+
+⚙️ 1. config.yaml
+
+This configuration file defines the gateways for Trino and PostgreSQL, and sets the default SQL dialect.
+
+gateways:
+  trino:
+    connection:
+      type: trino
+      host: localhost
+      port: 8080
+      user: sqlmesh_user
+      catalog: nessie
+      schema: default
+    state_connection:
+      type: postgres
+      host: localhost
+      port: 5432
+      user: sqlmesh
+      password: sqlmesh
+      database: sqlmesh
+
+model_defaults:
+  dialect: trino
+
+
+⸻
+
+📄 2. models/source_orders.sql
+
+This model defines an external table that reads data from the PostgreSQL source.
+
+CREATE EXTERNAL MODEL source_orders
+KIND EXTERNAL
+COLUMNS (
+  order_id INT,
+  customer_id INT,
+  amount DOUBLE,
+  order_date TIMESTAMP
+)
+AS (
+  SELECT order_id, customer_id, amount, order_date
+  FROM postgres.public.orders
+);
+
+
+⸻
+
+📄 3. models/transformed_orders.sql
+
+This model performs transformations on the source data and materializes the results into an Iceberg table.
+
+MODEL (
+  name transformed_orders,
+  kind INCREMENTAL_BY_TIME_RANGE (
+    time_column order_date
+  ),
+  dialect trino,
+  grain (order_id)
+)
+
+SELECT
+  order_id,
+  customer_id,
+  amount,
+  DATE(order_date) AS order_day
+FROM source_orders
+WHERE order_date BETWEEN '{{ start_ts }}' AND '{{ end_ts }}';
+
+
+⸻
+
+🚀 4. Running the Transformation
+
+To execute the transformation:
+
+sqlmesh plan --gateway trino
+sqlmesh apply --gateway trino
+
+This will:
+	1.	Read data from the PostgreSQL orders table via Trino.
+	2.	Transform the data as defined in transformed_orders.sql.
+	3.	Materialize the transformed data into an Iceberg table managed by Nessie.
+
+⸻
+
+🔍 5. Verifying the Results
+
+You can verify the results by querying the transformed_orders table through Trino:
+
+SELECT * FROM nessie.default.transformed_orders;
+
+
+⸻
+
+🧪 Additional Tips
+	•	Incremental Processing: The INCREMENTAL_BY_TIME_RANGE kind ensures that only new or updated records based on order_date are processed in each run.
+	•	Grain Specification: Setting grain (order_id) helps in deduplicating records based on the order_id.
+	•	Audits: You can add audits to your models to enforce data quality checks.
+
+⸻
+
+For a more comprehensive example, you might find the SQLMesh multi-engine demo project helpful. It showcases various scenarios involving multiple engines, including PostgreSQL and Iceberg.
+
+If you need assistance with setting up the necessary Docker containers for PostgreSQL, Trino, Nessie, and MinIO, feel free to ask!
