@@ -1,0 +1,156 @@
+Here’s a complete, Docker-based setup guide to transform an Oracle table and materialize it into an Iceberg lakehouse with Nessie—using dbt + Trino as your engine. This includes all required configuration and SQL files.
+
+⸻
+
+1️⃣ Trino Catalog Configuration
+
+💠 etc/catalog/oracle.properties
+
+connector.name=oracle
+connection-url=jdbc:oracle:thin:@<ORACLE_HOST>:1521:<SERVICE_NAME>
+connection-user=<oracle_user>
+connection-password=<oracle_password>
+
+# Optional tuning:
+^[oracle.connection-pool.max-size=30]({"attribution":{"attributableIndex":"0-1"}})
+^[oracle.remarks-reporting.enabled=true]({"attribution":{"attributableIndex":"0-2"}})
+
+✅ Configures the Oracle JDBC connector for federated reads  ￼.
+
+⸻
+
+💠 etc/catalog/nessie.properties
+
+connector.name=iceberg
+iceberg.catalog.type=nessie
+iceberg.nessie-catalog.uri=http://<NESSIE_HOST>:19120/api/v1
+iceberg.nessie-catalog.ref=main
+iceberg.nessie-catalog.default-warehouse-dir=s3://lakehouse/
+
+fs.native-s3.enabled=true
+s3.endpoint=http://<MINIO_HOST>:9000
+s3.path-style-access=true
+s3.aws-access-key=minioadmin
+s3.aws-secret-key=minioadmin
+
+✅ Configures Iceberg with Nessie metadata catalog and MinIO storage  ￼.
+
+⸻
+
+2️⃣ dbt Project Files
+
+📄 profiles.yml (typically in ~/.dbt/)
+
+trino_profile:
+  target: dev
+  outputs:
+    dev:
+      type: trino
+      host: localhost
+      port: 8080
+      user: dbt_user
+      catalog: nessie
+      schema: default
+
+	•	catalog: nessie must match your Trino configuration.
+
+⸻
+
+📄 dbt_project.yml
+
+name: oracle_to_iceberg
+version: '1.0'
+config-version: 2
+
+profile: trino_profile
+
+model-paths: ["models"]
+
+models:
+  oracle_to_iceberg:
+    +materialized: table
+    +schema: default
+    +catalog: nessie
+
+
+⸻
+
+3️⃣ SQL Models
+
+📝 models/source_orders.sql
+
+-- Read from Oracle via Trino
+SELECT
+  order_id,
+  customer_id,
+  amount,
+  order_date
+FROM oracle.<ORACLE_SCHEMA>.orders;
+
+📝 models/transformed_orders.sql
+
+{{ config(materialized='table') }}
+
+SELECT
+  order_id,
+  customer_id,
+  amount,
+  DATE(order_date) AS order_day
+FROM {{ ref('source_orders') }};
+
+	•	This reads from Oracle and writes to Iceberg in Nessie via Trino.
+
+⸻
+
+4️⃣ Workflow Steps
+	1.	Ensure Trino is running with both oracle.properties and nessie.properties.
+	2.	Verify Trino can query Oracle:
+
+SELECT * FROM oracle.<ORACLE_SCHEMA>.orders LIMIT 5;
+
+
+	3.	Verify writing to Nessie:
+
+CREATE TABLE nessie.default.test AS SELECT 1;
+
+
+	4.	Run dbt:
+
+dbt debug
+dbt run
+
+dbt executes queries that read from Oracle and write to Iceberg.
+
+⸻
+
+5️⃣ End-to-End Data Movement
+	•	dbt issues SQL to Trino
+	•	Trino reads from Oracle
+	•	Trino writes data to Iceberg/Nessie (creating Parquet files in MinIO)
+	•	Nessie commits metadata and snapshots
+
+⸻
+
+✅ Why It Works
+	•	Trino supports both Oracle and Nessie-Iceberg connectors, enabling cross-source queries  ￼ ￼ ￼ ￼ ￼.
+	•	dbt‑Trino adapter leverages Trino to run SQL and materialize results in Iceberg  ￼.
+
+⸻
+
+💡 Optional Enhancements
+	•	To implement incremental loads, change transformed_orders.sql:
+
+{{ config(materialized='incremental', unique_key='order_id') }}
+
+select ...
+from {{ ref('source_orders') }}
+{% if is_incremental() %}
+  where order_date > (select max(order_date) from {{ this }})
+{% endif %}
+
+
+	•	Add dbt tests or Airflow scheduling for production maturity.
+
+⸻
+
+With this configuration, you can confidently read data from Oracle, transform it, and materialize it into your Iceberg lakehouse using Nessie, all via dbt + Trino! If you’d like a Docker Compose example with Oracle, Trino, Nessie, MinIO, and dbt integrated, I can create one for you.
