@@ -28,6 +28,54 @@ o	Hive table statistics are often stale and data engineers have to keep executin
 
 
 
+
+Netflix tried to address the problems with the Hive table format, by creating a new table format.
+The goals Netflix wanted to achieve with this format were:
+-	Table correctness/consistency
+-	Faster query planning and inexpensive execution – eliminate file listing and better file pruning
+-	Allows users to not worry about the physical layout of the data. Users should be able to write queries naturally and be able to get benefit or partitioning.
+-	Table evolution – Allow adding, removal of table columns, changes to partition schema.
+-	Accomplish all of these at scale.
+
+With this we landed with the concept of iceberg.
+"With Iceberg, a table is a canonical list of files." 
+Instead of saying a table is all the files in a directory, theoretically the files in iceberg table could be anywhere. Files could be in different folders and does not have to be in nicely organized directory system.
+This is because iceberg is going to maintain the list of files in its metadata and the engine would leverage this metadata. This allows to get to the files faster.
+
+
+
+
+What iceberg is?
+1)	Table Format Specification:
+
+It’s a standard for how do we organize the data around the table.
+Any engine reading/writing data from iceberg table should implement this open specification.
+
+2)	A set of APIs and libraries of interaction with that specification (Java, Python API)
+
+These libraries are leveraged in other engines and tools that allow them to interact with iceberg tables.
+
+
+What iceberg is not?
+1)	Not a storage engine. (Storage options we could use are HDFS, object stores like S3)
+
+2)	Not an execution engine (Engine options we could use Spark, Presto, Flink etc)
+
+3)	Not a service. We do not have to run a server of some sort. It’s just a specification for storing and reading data and metadata files.
+
+
+
+
+
+
+Iceberg Design Benefits:
+-	Efficiently make smaller updates. Updates do not happen at the directory level now. Changes are made at the file level.
+-	Snapshot isolation for transactions. Every change to the table creates a new snapshot. All read are on the newest snapshot. Reads and writes do not interfere with each other and all writes are atomic. Read does not read a partial snapshot.
+-	Faster planning and execution. A lot of metadata is maintained at individual file, partition level allowing better file pruning while running the query. Column stats are maintained in the manifest files. These column stats are used to eliminate files.
+-	Reliable metrics for CBOs(vs hive). The column stats and metrics are calculated on write instead of frequent expensive jobs.
+-	Abstracting the physical, expose a logical view. Users don’t have to be familiar with the underlying physical structure of the table. Features like hidden partitioning, compaction of small files , table can change over time , ability to experiment with the table layout with breaking the table.
+-	Rich schema evolution support.
+-	All engines see changes immediately.
 <img width="1710" alt="Screenshot 2025-06-07 at 12 15 08 PM" src="https://github.com/user-attachments/assets/71facbf7-fa2b-474b-9912-9013bbc57a4e" />
 <img width="1710" alt="Screenshot 2025-06-07 at 12 20 36 PM" src="https://github.com/user-attachments/assets/2f8373da-b82c-4a68-8ec2-4a91ad089e68" />
 <img width="1710" alt="Screenshot 2025-06-07 at 12 25 03 PM" src="https://github.com/user-attachments/assets/781f974a-93ab-4074-9439-40f7a69d2616" />
