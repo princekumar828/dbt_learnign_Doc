@@ -15,7 +15,7 @@ connection-password=<oracle_password>
 ^[oracle.connection-pool.max-size=30]({"attribution":{"attributableIndex":"0-1"}})
 ^[oracle.remarks-reporting.enabled=true]({"attribution":{"attributableIndex":"0-2"}})
 
-✅ Configures the Oracle JDBC connector for federated reads  ￼.
+✅ Configures the Oracle JDBC connector for federated reads  ￼. 
 
 ⸻
 
