@@ -1,0 +1,372 @@
+Of course. Moving to Apache Spark is a natural step for handling large-scale data processing and machine learning workloads within your Iceberg lakehouse. Your existing Nessie and Minio infrastructure will work perfectly with Spark.
+
+Here’s a complete guide on how to configure and use Spark with your Nessie catalog and Minio storage.
+
+### Architectural Overview
+
+The architecture remains the same, with Spark now taking the role of the processing engine instead of Trino:
+
+1.  **Apache Spark:** The distributed processing engine for executing data engineering, analytics, and machine learning jobs.
+2.  **Nessie Server:** Your transactional, Git-like catalog for Iceberg metadata.
+3.  **Minio:** The S3-compatible object storage for your Iceberg data files (the warehouse).
+
+The interaction is straightforward: Spark communicates with Nessie for all metadata operations (what tables exist, where is their data) and directly with Minio for all data operations (reading/writing Parquet files).
+
+---
+
+### 1. Dependencies and Compatibility
+
+This is the most crucial step. Spark needs the correct JAR files to understand how to talk to Iceberg, Nessie, and Minio. The easiest way to provide these is using the `--packages` option when starting Spark.
+
+You need to ensure the versions of Spark, Iceberg, and Nessie are compatible. **You can always find the latest compatibility matrix on the [official Project Nessie GitHub page](https://github.com/projectnessie/nessie#compatibility).**
+
+Based on a common setup, here are the packages you would need for **Spark 3.5**:
+
+* **Iceberg Spark Runtime:** `org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0`
+* **Nessie Spark Extensions:** `org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.91.0`
+* **AWS S3 Support:** `org.apache.hadoop:hadoop-aws:3.3.4` and `software.amazon.awssdk:bundle:2.17.257`
+
+### 2. Spark Configuration
+
+You need to configure Spark to use the Nessie catalog and connect to Minio. This is done by setting properties when you create your Spark session. The configuration tells Spark:
+* To enable Iceberg and Nessie extensions.
+* Where to find your Nessie catalog.
+* How to connect to Minio as your S3 file system.
+
+Here is a complete set of configuration properties:
+
+```python
+# Spark Configuration Dictionary
+spark_conf = {
+    # --- PACKAGES ---
+    "spark.jars.packages": "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,"
+                           "org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.91.0,"
+                           "org.apache.hadoop:hadoop-aws:3.3.4,"
+                           "software.amazon.awssdk:bundle:2.17.257",
+
+    # --- SQL EXTENSIONS ---
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,"
+                            "org.projectnessie.spark.extensions.NessieSparkSessionExtensions",
+
+    # --- NESSIE CATALOG CONFIGURATION ---
+    "spark.sql.catalog.nessie": "org.apache.iceberg.spark.SparkCatalog",
+    "spark.sql.catalog.nessie.catalog-impl": "org.apache.iceberg.nessie.NessieCatalog",
+    "spark.sql.catalog.nessie.warehouse": "s3a://warehouse", # Your Minio bucket
+    "spark.sql.catalog.nessie.uri": "http://localhost:19120/api/v1", # Your Nessie server URI
+    "spark.sql.catalog.nessie.ref": "main", # Default branch to work on
+
+    # --- S3/MINIO CONFIGURATION ---
+    "spark.hadoop.fs.s3a.endpoint": "http://localhost:9000", # Your Minio server URI
+    "spark.hadoop.fs.s3a.access.key": "minioadmin",
+    "spark.hadoop.fs.s3a.secret.key": "minioadmin",
+    "spark.hadoop.fs.s3a.path.style.access": "true",
+    "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
+}
+```
+
+### 3. Putting it all Together: Practical Examples
+
+You can apply these configurations in two primary ways: interactively with `pyspark` or programmatically in a Python script.
+
+#### Option A: Interactive `pyspark` Shell
+
+This is perfect for exploration and ad-hoc analysis. Launch the `pyspark` shell from your terminal with all the configurations passed as command-line arguments.
+
+```bash
+pyspark \
+--packages org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.91.0,org.apache.hadoop:hadoop-aws:3.3.4,software.amazon.awssdk:bundle:2.17.257 \
+--conf spark.sql.extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions" \
+--conf spark.sql.catalog.nessie="org.apache.iceberg.spark.SparkCatalog" \
+--conf spark.sql.catalog.nessie.catalog-impl="org.apache.iceberg.nessie.NessieCatalog" \
+--conf spark.sql.catalog.nessie.warehouse="s3a://warehouse" \
+--conf spark.sql.catalog.nessie.uri="http://localhost:19120/api/v1" \
+--conf spark.sql.catalog.nessie.ref="main" \
+--conf spark.hadoop.fs.s3a.endpoint="http://localhost:9000" \
+--conf spark.hadoop.fs.s3a.access.key="minioadmin" \
+--conf spark.hadoop.fs.s3a.secret.key="minioadmin" \
+--conf spark.hadoop.fs.s3a.path.style.access="true" \
+--conf spark.hadoop.fs.s3a.connection.ssl.enabled="false"
+```
+
+Once the shell starts, you can immediately run Spark SQL queries.
+
+#### Option B: Python Script (`spark-submit`)
+
+For building applications, it's best to configure the `SparkSession` within your Python script.
+
+```python
+from pyspark.sql import SparkSession
+
+# Define all configurations in a dictionary
+spark_conf = {
+    "spark.jars.packages": "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,"
+                           "org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.91.0,"
+                           "org.apache.hadoop:hadoop-aws:3.3.4,"
+                           "software.amazon.awssdk:bundle:2.17.257",
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,"
+                            "org.projectnessie.spark.extensions.NessieSparkSessionExtensions",
+    "spark.sql.catalog.nessie": "org.apache.iceberg.spark.SparkCatalog",
+    "spark.sql.catalog.nessie.catalog-impl": "org.apache.iceberg.nessie.NessieCatalog",
+    "spark.sql.catalog.nessie.warehouse": "s3a://warehouse",
+    "spark.sql.catalog.nessie.uri": "http://localhost:19120/api/v1",
+    "spark.sql.catalog.nessie.ref": "main",
+    "spark.hadoop.fs.s3a.endpoint": "http://localhost:9000",
+    "spark.hadoop.fs.s3a.access.key": "minioadmin",
+    "spark.hadoop.fs.s3a.secret.key": "minioadmin",
+    "spark.hadoop.fs.s3a.path.style.access": "true",
+    "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
+}
+
+# Build the SparkSession
+builder = SparkSession.builder.appName("IcebergNessieMinioApp")
+
+for key, value in spark_conf.items():
+    builder = builder.config(key, value)
+
+spark = builder.getOrCreate()
+
+# --- Your Spark code starts here ---
+
+print("Spark Session created and configured for Iceberg, Nessie, and Minio!")
+
+# Example: List branches in Nessie
+spark.sql("LIST REFERENCES IN nessie").show()
+
+# Example: Create a table
+spark.sql("CREATE TABLE IF NOT EXISTS nessie.db.my_spark_table (id INT, data STRING) USING iceberg")
+
+# Example: Write data using DataFrames
+data = [(1, "hello"), (2, "spark")]
+columns = ["id", "data"]
+df = spark.createDataFrame(data, columns)
+df.writeTo("nessie.db.my_spark_table").append()
+
+# Example: Read data
+print("Reading data from the table:")
+spark.read.table("nessie.db.my_spark_table").show()
+
+spark.stop()
+```
+
+### 4. Usage: SQL and DataFrame API
+
+With the catalog configured, you can use both Spark SQL and the DataFrame API to interact with your Iceberg tables seamlessly. The catalog name is `nessie`, which you defined in the configuration.
+
+* **Create a table:**
+    ```sql
+    CREATE TABLE nessie.db.products (id INT, name STRING, price DOUBLE) USING iceberg
+    ```
+
+* **Write to a table (DataFrame API):**
+    ```python
+    products_df = spark.createDataFrame([(101, 'Laptop', 1299.99)], ['id', 'name', 'price'])
+    products_df.writeTo("nessie.db.products").append()
+    ```
+
+* **Read from a table:**
+    ```python
+    df = spark.read.table("nessie.db.products")
+    df.show()
+    ```
+
+* **Use Nessie's Git-like features:**
+    ```sql
+    -- Create a branch for experimentation
+    CREATE BRANCH etl_dev IN nessie;
+
+    -- Use the new branch
+    USE REFERENCE etl_dev IN nessie;
+
+    -- All subsequent operations will happen on the 'etl_dev' branch
+    INSERT INTO nessie.db.products VALUES (102, 'Keyboard', 75.50);
+
+    -- Merge the changes back to main
+    MERGE BRANCH etl_dev INTO main IN nessie;
+    ```
+
+
+
+
+
+
+
+
+    ------------------------------------------------------------------------------------------------------------------
+
+
+
+
+
+    Of course. Setting up Spark to run alongside your other services is the next logical step. The best way to do this for a local development environment is to add Spark itself as a service to your `docker-compose.yml` file.
+
+This approach is highly recommended because:
+* **All-in-One Environment:** You can start and stop your entire lakehouse stack (Spark, Nessie, Minio) with a single command (`docker-compose up`).
+* **Automatic Networking:** The containers can easily communicate with each other using their service names (e.g., Spark can reach Nessie at `http://nessie:19120`).
+* **Simplified Development:** You can write your Spark code locally and easily run it inside the containerized Spark environment.
+
+Here’s how to modify your `docker-compose.yml` to include a Spark master and a Spark worker.
+
+### 1. Updated `docker-compose.yml` with Spark
+
+This file now includes `spark-master` and `spark-worker` services. We will use the popular Bitnami Spark image, which is well-suited for this purpose.
+
+```yaml
+version: '3.8'
+
+services:
+  # --------------------------------------------------
+  # Nessie Catalog Service
+  # --------------------------------------------------
+  nessie:
+    image: projectnessie/nessie:0.91.0 # Use a version compatible with your Spark extensions
+    container_name: nessie
+    ports:
+      - "19120:19120"
+
+  # --------------------------------------------------
+  # Minio Storage Service
+  # --------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2023-09-07T02-05-02Z
+    container_name: minio
+    ports:
+      - "9000:9000"  # S3 API Port
+      - "9001:9001"  # Minio Console Port
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio-data:/data
+
+  # --------------------------------------------------
+  # Spark Master Service
+  # --------------------------------------------------
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "9090:8080"  # Spark Master Web UI
+      - "7077:7077"  # Spark Master Port
+    volumes:
+      - ./spark-apps:/opt/bitnami/spark/apps # Mount local folder for your scripts
+    depends_on:
+      - nessie
+      - minio
+
+  # --------------------------------------------------
+  # Spark Worker Service
+  # --------------------------------------------------
+  spark-worker:
+    image: bitnami/spark:3.5
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077 # Connect worker to the master
+      - SPARK_WORKER_MEMORY=1G
+      - SPARK_WORKER_CORES=1
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    volumes:
+      - ./spark-apps:/opt/bitnami/spark/apps
+    depends_on:
+      - spark-master
+
+volumes:
+  minio-data:
+```
+
+### 2. Setting Up Your Local Project Folder
+
+Before you run `docker-compose`, create the following folder structure in your project directory:
+
+```
+my-lakehouse-project/
+├── docker-compose.yml
+└── spark-apps/
+    └── my_first_job.py
+```
+
+* The `docker-compose.yml` file is the one from above.
+* The `spark-apps` folder is where you will write your Python Spark scripts. The `volumes` section in the docker-compose file makes this folder available inside the Spark containers.
+
+### 3. How to Run and Use the Environment
+
+#### Step 1: Start Your Lakehouse Stack
+
+Navigate to your project directory in the terminal and run:
+
+```bash
+docker-compose up -d
+```
+This command will start all services (Nessie, Minio, Spark Master, Spark Worker) in detached mode.
+
+#### Step 2: Verify the Setup
+
+1.  **Minio Console:** Open your browser to `http://localhost:9001`. Log in with `minioadmin` / `minioadmin` and create your `warehouse` bucket.
+2.  **Nessie API:** You can check if Nessie is running by going to `http://localhost:19120/api/v1/trees`.
+3.  **Spark Master UI:** Open your browser to `http://localhost:9090`. You should see the Spark Master UI and **one registered worker**. This confirms your Spark cluster is running.
+
+#### Step 3: Create Your Spark Script
+
+Place the Python script from our previous discussion into the `spark-apps/my_first_job.py` file.
+
+**Important:** You must adjust the URIs inside the script to use the Docker service names instead of `localhost`.
+
+File: `spark-apps/my_first_job.py`
+```python
+from pyspark.sql import SparkSession
+
+# Note the change from localhost to the Docker service names 'nessie' and 'minio'
+nessie_uri = "http://nessie:19120/api/v1"
+minio_endpoint = "http://minio:9000"
+
+spark_conf = {
+    "spark.jars.packages": "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.5.0,org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.91.0,org.apache.hadoop:hadoop-aws:3.3.4,software.amazon.awssdk:bundle:2.17.257",
+    "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions",
+    "spark.sql.catalog.nessie": "org.apache.iceberg.spark.SparkCatalog",
+    "spark.sql.catalog.nessie.catalog-impl": "org.apache.iceberg.nessie.NessieCatalog",
+    "spark.sql.catalog.nessie.warehouse": "s3a://warehouse",
+    "spark.sql.catalog.nessie.uri": nessie_uri,
+    "spark.sql.catalog.nessie.ref": "main",
+    "spark.hadoop.fs.s3a.endpoint": minio_endpoint,
+    "spark.hadoop.fs.s3a.access.key": "minioadmin",
+    "spark.hadoop.fs.s3a.secret.key": "minioadmin",
+    "spark.hadoop.fs.s3a.path.style.access": "true",
+    "spark.hadoop.fs.s3a.connection.ssl.enabled": "false",
+}
+
+builder = SparkSession.builder.appName("IcebergNessieMinioApp")
+for key, value in spark_conf.items():
+    builder = builder.config(key, value)
+
+spark = builder.getOrCreate()
+
+print("Spark Session created and configured for Iceberg, Nessie, and Minio!")
+spark.sql("LIST REFERENCES IN nessie").show()
+spark.sql("CREATE TABLE IF NOT EXISTS nessie.db.my_spark_table (id INT, data STRING) USING iceberg")
+spark.sql("INSERT INTO nessie.db.my_spark_table VALUES (100, 'Data from Spark inside Docker')")
+spark.read.table("nessie.db.my_spark_table").show()
+
+spark.stop()
+```
+
+#### Step 4: Submit Your Spark Job
+
+Now, you execute your script using `docker-compose exec`. This command runs `spark-submit` *inside* the `spark-master` container.
+
+```bash
+docker-compose exec spark-master spark-submit \
+  --master spark://spark-master:7077 \
+  apps/my_first_job.py
+```
+This command tells the Spark master to run the script located at `/opt/bitnami/spark/apps/my_first_job.py` (which is your local file).
+
+You will see the output of the Spark job directly in your terminal, including the final DataFrame from the `show()` command. You have now successfully set up and run a Spark application within a complete, containerized Iceberg lakehouse environment.
