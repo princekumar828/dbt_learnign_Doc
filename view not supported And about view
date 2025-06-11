@@ -1,0 +1,104 @@
+The underlying root cause is that Iceberg tables drop CHAR, converting them to VARCHAR, which avoids errors.
+	•	Views, however, inherit the original CHAR(1) type and fail validation.
+
+
+
+	Iceberg enforces a fixed set of supported data types (like int, long, boolean, string, date, timestamp, decimal, arrays, maps, structs)  ￼.
+	•	Trying to create a table or view that references an unsupported type—such as tinyint, smallint, char, fixed(L), uuid, or certain timestamp formats—will trigger a schema validation error, regardless of whether it’s a table or a view  ￼.
+	•	Views don’t store data; they just wrap the SQL query against the table. If the table has invalid types, the view won’t even compile/query due to the underlying schema issue.
+
+
+
+    
+⸻
+
+❄️ What Is an Iceberg View?
+
+An Iceberg view is a logical, virtual table definition on top of one or more Iceberg tables. Unlike physical tables, it does not store any data, only the SQL query logic that defines it  ￼.
+
+⸻
+
+📦 What It Consists Of
+
+Per the official Iceberg View Spec:
+	•	view-uuid: Unique identifier
+	•	format-version: View spec version(1)
+	•	location: Base path for metadata
+	•	schemas: List of supported schemas
+	•	current-version-id + versions + version-log: Tracks view history with timestamps
+	•	properties: Optional metadata like comments
+	•	representations: Different SQL dialects (e.g., Trino, Spark) with fields such as SQL text and dialect info
+
+With Project Nessie, these views and their versions are stored right alongside Iceberg tables, allowing transactional branching, rollback, and experimentation .
+
+⸻
+
+🎯 Why Use Iceberg Views?
+
+1. Cross-engine Portability
+
+Views are engine-agnostic—defined in the Iceberg catalog—so tools like Trino, Spark, Dremio, etc., can all recognize and query them  ￼.
+
+2. Data Abstraction & Governance
+
+Users see only curated logic—like filtered or aggregated datasets. Good for encapsulating complex business rules and hiding PII or internal joins  ￼.
+
+3. Centralized, Versioned Logic
+
+Changes to view SQL are tracked historically, facilitating auditability and rollback  ￼.
+
+4. No Storage Overhead
+
+Views don’t incur additional storage cost since they’re query definitions, not data copies  ￼.
+
+⸻
+
+🚀 How It Helps Your Data Stack
+
+Benefit	Description
+Simplifies Access	End-users use view names instead of writing JOINs and filters.
+Ensures Consistency	One source of truth for calculations across tools.
+Supports Evolution	SQL logic can change over time with a rollback if needed.
+Enables Governance	Restrict access via views—drop sensitive columns in view logic.
+Enhances Interoperability	All engines can understand the same view definitions.
+
+
+⸻
+
+🧩 Example JSON Metadata (Simplified)
+
+{
+  "view-uuid": "...",
+  "format-version": 1,
+  "schemas": [...],
+  "current-version-id": 42,
+  "versions": [{
+    "version-id": 42,
+    "timestamp-ms": 172XXXXXXXXX,
+    "representations": [
+      {"type": "sql", "dialect": "trino", "sql": "SELECT ..."}
+    ]
+  }],
+  "version-log": [...],
+  "properties": {"comment": "customer summary view"}
+}
+
+This metadata ensures the view is fully described and versioned  ￼.
+
+⸻
+
+🛠️ When to Use Them
+	•	To encapsulate complex transformations or business logic.
+	•	To standardize KPIs across teams and tools.
+	•	To restrict or mask data in multi-tenant environments.
+	•	To support versioned feature engineering in MLOps.
+
+⸻
+
+✨ In Summary
+
+Iceberg views are powerful, flexible, versioned logical layers over your data. They enhance abstraction, portability, governance, and consistency—with no data duplication. When combined with project version control (like Nessie), they become invaluable tools in modern lakehouse architecture.
+
+⸻
+
+Would you like guidance on how to create them using Spark/Trino, or how to manage them via the REST API (like listing or versioning views)?
