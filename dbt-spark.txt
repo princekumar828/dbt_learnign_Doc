@@ -1,0 +1,441 @@
+# Iceberg Lakehouse Setup Guide
+
+This guide will walk you through setting up a complete data lakehouse using:
+- **MinIO**: S3-compatible object storage
+- **Apache Iceberg**: Open table format
+- **Nessie**: Git-like catalog for data versioning
+- **Apache Spark**: Distributed query engine
+- **dbt**: Data transformation tool
+
+## Architecture Overview
+
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│     dbt     │────│    Spark     │────│   Nessie    │
+│(Transform)  │    │ (Compute)    │    │ (Catalog)   │
+└─────────────┘    └──────────────┘    └─────────────┘
+                            │                   │
+                            └───────────────────┼─────────┐
+                                               │         │
+                                    ┌─────────────┐    ┌─────────────┐
+                                    │   MinIO     │    │  Iceberg    │
+                                    │ (Storage)   │    │ (Format)    │
+                                    └─────────────┘    └─────────────┘
+```
+
+## Prerequisites
+
+- Docker and Docker Compose
+- Java 11 or higher
+- Python 3.8+
+- Minimum 8GB RAM
+
+## Step 1: Infrastructure Setup with Docker Compose
+
+Create a `docker-compose.yml` file:
+
+```yaml
+version: '3.8'
+
+services:
+  # MinIO - S3 Compatible Storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # Nessie - Git-like Catalog
+  nessie:
+    image: projectnessie/nessie:latest
+    container_name: nessie
+    ports:
+      - "19120:19120"
+    environment:
+      - QUARKUS_HTTP_PORT=19120
+      - NESSIE_VERSION_STORE_TYPE=IN_MEMORY
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19120/api/v1/trees"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Spark Master
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/ivy:z
+
+  # Spark Worker
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    depends_on:
+      - spark-master
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/ivy:z
+
+volumes:
+  minio_data:
+
+networks:
+  default:
+    name: lakehouse-network
+```
+
+## Step 2: Download Required JAR Files
+
+Create a directory for Spark JARs and download required dependencies:
+
+```bash
+mkdir -p spark-jars
+
+# Download Iceberg Spark Runtime
+wget -O spark-jars/iceberg-spark-runtime-3.5_2.12-1.4.2.jar \
+  https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.2/iceberg-spark-runtime-3.5_2.12-1.4.2.jar
+
+# Download Nessie Spark Extensions
+wget -O spark-jars/nessie-spark-extensions-3.5_2.12-0.77.1.jar \
+  https://repo1.maven.org/maven2/org/projectnessie/nessie-spark-extensions-3.5_2.12/0.77.1/nessie-spark-extensions-3.5_2.12-0.77.1.jar
+
+# Download AWS SDK for S3 access
+wget -O spark-jars/aws-java-sdk-bundle-1.11.1026.jar \
+  https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.11.1026/aws-java-sdk-bundle-1.11.1026.jar
+
+# Download Hadoop AWS
+wget -O spark-jars/hadoop-aws-3.3.4.jar \
+  https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar
+```
+
+## Step 3: Start the Infrastructure
+
+```bash
+# Start all services
+docker-compose up -d
+
+# Check service health
+docker-compose ps
+
+# View logs if needed
+docker-compose logs -f nessie
+docker-compose logs -f minio
+```
+
+## Step 4: Configure MinIO
+
+1. Access MinIO Console at http://localhost:9001
+2. Login with `minioadmin` / `minioadmin123`
+3. Create a bucket named `lakehouse`
+4. Create access keys for programmatic access
+
+## Step 5: Spark Configuration
+
+Create a `spark-defaults.conf` file:
+
+```properties
+# Iceberg Configuration
+spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions
+spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.nessie.catalog-impl=org.apache.iceberg.nessie.NessieCatalog
+spark.sql.catalog.nessie.uri=http://nessie:19120/api/v1
+spark.sql.catalog.nessie.ref=main
+spark.sql.catalog.nessie.warehouse=s3a://lakehouse/warehouse
+spark.sql.catalog.nessie.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+
+# S3 Configuration
+spark.hadoop.fs.s3a.endpoint=http://minio:9000
+spark.hadoop.fs.s3a.access.key=minioadmin
+spark.hadoop.fs.s3a.secret.key=minioadmin123
+spark.hadoop.fs.s3a.path.style.access=true
+spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+spark.hadoop.fs.s3a.connection.ssl.enabled=false
+
+# Performance Tuning
+spark.serializer=org.apache.spark.serializer.KryoSerializer
+spark.sql.adaptive.enabled=true
+spark.sql.adaptive.coalescePartitions.enabled=true
+```
+
+## Step 6: Test Spark with Iceberg
+
+Connect to Spark and create a test table:
+
+```bash
+# Connect to Spark master container
+docker exec -it spark-master /bin/bash
+
+# Start Spark SQL with custom configuration
+/opt/bitnami/spark/bin/spark-sql \
+  --conf spark.sql.extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions" \
+  --conf spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog \
+  --conf spark.sql.catalog.nessie.catalog-impl=org.apache.iceberg.nessie.NessieCatalog \
+  --conf spark.sql.catalog.nessie.uri=http://nessie:19120/api/v1 \
+  --conf spark.sql.catalog.nessie.ref=main \
+  --conf spark.sql.catalog.nessie.warehouse=s3a://lakehouse/warehouse \
+  --conf spark.sql.catalog.nessie.io-impl=org.apache.iceberg.aws.s3.S3FileIO \
+  --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+  --conf spark.hadoop.fs.s3a.access.key=minioadmin \
+  --conf spark.hadoop.fs.s3a.secret.key=minioadmin123 \
+  --conf spark.hadoop.fs.s3a.path.style.access=true \
+  --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+  --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false
+```
+
+Test SQL commands:
+
+```sql
+-- Create a namespace
+CREATE NAMESPACE IF NOT EXISTS nessie.sample_db;
+
+-- Create an Iceberg table
+CREATE TABLE nessie.sample_db.orders (
+    order_id BIGINT,
+    customer_id BIGINT,
+    order_date DATE,
+    amount DECIMAL(10,2)
+) USING ICEBERG;
+
+-- Insert sample data
+INSERT INTO nessie.sample_db.orders VALUES 
+(1, 101, '2024-01-01', 150.00),
+(2, 102, '2024-01-02', 200.50),
+(3, 103, '2024-01-03', 75.25);
+
+-- Query the data
+SELECT * FROM nessie.sample_db.orders;
+
+-- Show table history
+SELECT * FROM nessie.sample_db.orders.history;
+```
+
+## Step 7: dbt Setup
+
+### Install dbt with Spark adapter
+
+```bash
+pip install dbt-spark[PyHive]
+```
+
+### Initialize dbt project
+
+```bash
+# Create dbt project
+dbt init lakehouse_project
+cd lakehouse_project
+```
+
+### Configure dbt profiles
+
+Edit `~/.dbt/profiles.yml`:
+
+```yaml
+lakehouse_project:
+  outputs:
+    dev:
+      type: spark
+      method: thrift
+      host: localhost
+      port: 10000
+      user: spark
+      schema: sample_db
+      threads: 4
+      connect_retries: 5
+      connect_timeout: 60
+      retry_all: true
+  target: dev
+```
+
+### Create dbt models
+
+Create `models/staging/stg_orders.sql`:
+
+```sql
+{{ config(
+    materialized='table',
+    file_format='iceberg',
+    table_properties={
+        'catalog': 'nessie'
+    }
+) }}
+
+SELECT 
+    order_id,
+    customer_id,
+    order_date,
+    amount,
+    CASE 
+        WHEN amount > 100 THEN 'high_value'
+        ELSE 'regular'
+    END as order_category
+FROM {{ ref('raw_orders') }}
+```
+
+Create `models/marts/dim_customers.sql`:
+
+```sql
+{{ config(
+    materialized='table',
+    file_format='iceberg',
+    table_properties={
+        'catalog': 'nessie'
+    }
+) }}
+
+SELECT 
+    customer_id,
+    COUNT(*) as total_orders,
+    SUM(amount) as total_spent,
+    AVG(amount) as avg_order_value,
+    MAX(order_date) as last_order_date
+FROM {{ ref('stg_orders') }}
+GROUP BY customer_id
+```
+
+### Run dbt transformations
+
+```bash
+# Install dependencies
+dbt deps
+
+# Run models
+dbt run
+
+# Test data quality
+dbt test
+
+# Generate documentation
+dbt docs generate
+dbt docs serve
+```
+
+## Step 8: Advanced Configuration
+
+### Nessie Branching
+
+```sql
+-- Create a new branch for development
+CREATE BRANCH dev_branch IN nessie;
+
+-- Switch to the branch
+USE BRANCH dev_branch IN nessie;
+
+-- Create experimental table
+CREATE TABLE nessie.sample_db.experimental_data (
+    id BIGINT,
+    data STRING
+) USING ICEBERG;
+```
+
+### Schema Evolution
+
+```sql
+-- Add a new column to existing table
+ALTER TABLE nessie.sample_db.orders 
+ADD COLUMN shipping_cost DECIMAL(10,2);
+
+-- Update data with new column
+UPDATE nessie.sample_db.orders 
+SET shipping_cost = 10.00 
+WHERE order_id = 1;
+```
+
+### Time Travel Queries
+
+```sql
+-- Query table as of specific timestamp
+SELECT * FROM nessie.sample_db.orders 
+TIMESTAMP AS OF '2024-01-01 00:00:00';
+
+-- Query table as of specific snapshot
+SELECT * FROM nessie.sample_db.orders 
+VERSION AS OF 1;
+```
+
+## Step 9: Monitoring and Maintenance
+
+### Health Checks
+
+```bash
+# Check MinIO status
+curl http://localhost:9000/minio/health/live
+
+# Check Nessie status
+curl http://localhost:19120/api/v1/trees
+
+# Check Spark UI
+# Access http://localhost:8080
+```
+
+### Backup Strategy
+
+```bash
+# Backup Nessie metadata
+curl -X GET http://localhost:19120/api/v1/trees/main/log > nessie_backup.json
+
+# MinIO data is persisted in Docker volume
+docker volume ls | grep minio
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Connection timeouts**: Increase timeout values in Spark configuration
+2. **Memory issues**: Adjust Spark worker memory settings
+3. **S3 access errors**: Verify MinIO credentials and endpoint configuration
+4. **JAR conflicts**: Ensure compatible versions of all dependencies
+
+### Useful Commands
+
+```bash
+# Restart specific service
+docker-compose restart nessie
+
+# View service logs
+docker-compose logs -f spark-master
+
+# Clean up and restart
+docker-compose down -v
+docker-compose up -d
+```
+
+## Next Steps
+
+1. **Production Deployment**: Use Kubernetes for orchestration
+2. **Security**: Implement proper authentication and SSL/TLS
+3. **Monitoring**: Add Prometheus/Grafana for metrics
+4. **CI/CD**: Integrate dbt with version control and automated testing
+5. **Data Governance**: Implement data lineage and quality monitoring
+
+This setup provides a solid foundation for a modern data lakehouse architecture with versioning, schema evolution, and robust data transformation capabilities.
