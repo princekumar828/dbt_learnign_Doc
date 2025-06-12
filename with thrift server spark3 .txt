@@ -1,0 +1,447 @@
+version: '3.8'
+
+services:
+  # MinIO - S3 Compatible Storage
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - lakehouse-network
+
+  # Nessie - Git-like Catalog
+  nessie:
+    image: projectnessie/nessie:latest
+    container_name: nessie
+    ports:
+      - "19120:19120"
+    environment:
+      - QUARKUS_HTTP_PORT=19120
+      - NESSIE_VERSION_STORE_TYPE=IN_MEMORY
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:19120/api/v1/trees"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - lakehouse-network
+
+  # Spark Master
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+    ports:
+      - "8080:8080"  # Spark Master Web UI
+      - "7077:7077"  # Spark Master Port
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/ivy:z
+      - ./conf:/opt/bitnami/spark/conf:ro
+    networks:
+      - lakehouse-network
+
+  # Spark Worker
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_WORKER_CORES=2
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+    depends_on:
+      - spark-master
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/ivy:z
+      - ./conf:/opt/bitnami/spark/conf:ro
+    networks:
+      - lakehouse-network
+
+  # Spark Thrift Server - This is the NEW addition for dbt connectivity
+  spark-thrift-server:
+    image: bitnami/spark:3.5
+    container_name: spark-thrift-server
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+      - SPARK_USER=spark
+    ports:
+      - "10000:10000"  # Thrift Server Port (this is what dbt connects to)
+      - "4040:4040"    # Spark Application Web UI
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/ivy:z
+      - ./conf:/opt/bitnami/spark/conf:ro
+      - ./thrift-server-start.sh:/opt/start-thrift-server.sh:ro
+    depends_on:
+      - spark-master
+      - nessie
+      - minio
+    command: ["/bin/bash", "/opt/start-thrift-server.sh"]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - lakehouse-network
+
+volumes:
+  minio_data:
+
+networks:
+  lakehouse-network:
+    driver: bridge
+
+
+
+
+
+
+
+
+#!/bin/bash
+
+# thrift-server-start.sh
+# This script starts the Spark Thrift Server with all necessary configurations
+
+echo "Starting Spark Thrift Server..."
+
+# Wait for dependencies to be ready
+echo "Waiting for Spark Master to be ready..."
+until nc -z spark-master 7077; do
+  echo "Waiting for Spark Master..."
+  sleep 5
+done
+
+echo "Waiting for Nessie to be ready..."
+until nc -z nessie 19120; do
+  echo "Waiting for Nessie..."
+  sleep 5
+done
+
+echo "Waiting for MinIO to be ready..."
+until nc -z minio 9000; do
+  echo "Waiting for MinIO..."
+  sleep 5
+done
+
+echo "All dependencies are ready. Starting Thrift Server..."
+
+# Start the Thrift Server with all Iceberg and Nessie configurations
+exec /opt/bitnami/spark/sbin/start-thriftserver.sh \
+  --master spark://spark-master:7077 \
+  --driver-memory 1g \
+  --executor-memory 1g \
+  --executor-cores 1 \
+  --num-executors 1 \
+  --conf spark.sql.extensions="org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions" \
+  --conf spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog \
+  --conf spark.sql.catalog.nessie.catalog-impl=org.apache.iceberg.nessie.NessieCatalog \
+  --conf spark.sql.catalog.nessie.uri=http://nessie:19120/api/v1 \
+  --conf spark.sql.catalog.nessie.ref=main \
+  --conf spark.sql.catalog.nessie.warehouse=s3a://lakehouse/warehouse \
+  --conf spark.sql.catalog.nessie.io-impl=org.apache.iceberg.aws.s3.S3FileIO \
+  --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000 \
+  --conf spark.hadoop.fs.s3a.access.key=minioadmin \
+  --conf spark.hadoop.fs.s3a.secret.key=minioadmin123 \
+  --conf spark.hadoop.fs.s3a.path.style.access=true \
+  --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+  --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+  --conf spark.serializer=org.apache.spark.serializer.KryoSerializer \
+  --conf spark.sql.adaptive.enabled=true \
+  --conf spark.sql.adaptive.coalescePartitions.enabled=true \
+  --hiveconf hive.server2.thrift.port=10000 \
+  --hiveconf hive.server2.thrift.bind.host=0.0.0.0 \
+  --hiveconf hive.server2.authentication=NOSASL \
+  --hiveconf hive.server2.transport.mode=binary
+
+
+
+
+
+
+
+
+# conf/spark-defaults.conf
+# Spark configuration file for Iceberg integration
+
+# Iceberg and Nessie Extensions
+spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,org.projectnessie.spark.extensions.NessieSparkSessionExtensions
+
+# Nessie Catalog Configuration
+spark.sql.catalog.nessie=org.apache.iceberg.spark.SparkCatalog
+spark.sql.catalog.nessie.catalog-impl=org.apache.iceberg.nessie.NessieCatalog
+spark.sql.catalog.nessie.uri=http://nessie:19120/api/v1
+spark.sql.catalog.nessie.ref=main
+spark.sql.catalog.nessie.warehouse=s3a://lakehouse/warehouse
+spark.sql.catalog.nessie.io-impl=org.apache.iceberg.aws.s3.S3FileIO
+
+# S3/MinIO Configuration
+spark.hadoop.fs.s3a.endpoint=http://minio:9000
+spark.hadoop.fs.s3a.access.key=minioadmin
+spark.hadoop.fs.s3a.secret.key=minioadmin123
+spark.hadoop.fs.s3a.path.style.access=true
+spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+spark.hadoop.fs.s3a.connection.ssl.enabled=false
+spark.hadoop.fs.s3a.fast.upload=true
+spark.hadoop.fs.s3a.block.size=134217728
+spark.hadoop.fs.s3a.multipart.size=134217728
+
+# Performance Configuration
+spark.serializer=org.apache.spark.serializer.KryoSerializer
+spark.sql.adaptive.enabled=true
+spark.sql.adaptive.coalescePartitions.enabled=true
+spark.sql.adaptive.skewJoin.enabled=true
+
+# Thrift Server Specific Settings
+spark.sql.thriftServer.incrementalCollect=true
+spark.sql.hive.thriftServer.singleSession=true
+
+
+
+
+
+
+
+
+# ~/.dbt/profiles.yml
+# dbt profile configuration for Spark Thrift Server connection
+
+lakehouse_project:
+  outputs:
+    dev:
+      type: spark
+      method: thrift
+      host: localhost
+      port: 10000
+      user: spark
+      schema: sample_db
+      threads: 4
+      connect_retries: 10
+      connect_timeout: 120
+      retry_all: true
+      # Additional Thrift-specific settings
+      auth: NOSASL
+      use_ssl: false
+      # Optional: specify default catalog
+      catalog: nessie
+      
+    prod:
+      type: spark
+      method: thrift
+      host: localhost
+      port: 10000
+      user: spark
+      schema: prod_db
+      threads: 8
+      connect_retries: 10
+      connect_timeout: 120
+      retry_all: true
+      auth: NOSASL
+      use_ssl: false
+      catalog: nessie
+      
+  target: dev
+
+
+
+
+
+
+
+
+
+
+
+
+# Complete Setup with Spark Thrift Server
+
+## Directory Structure
+
+Create the following directory structure:
+
+```
+lakehouse-setup/
+├── docker-compose.yml
+├── spark-jars/
+│   ├── iceberg-spark-runtime-3.5_2.12-1.4.2.jar
+│   ├── nessie-spark-extensions-3.5_2.12-0.77.1.jar
+│   ├── aws-java-sdk-bundle-1.11.1026.jar
+│   └── hadoop-aws-3.3.4.jar
+├── conf/
+│   └── spark-defaults.conf
+└── thrift-server-start.sh
+```
+
+## Step-by-Step Setup
+
+### 1. Create Project Directory and Files
+
+```bash
+# Create project directory
+mkdir lakehouse-setup
+cd lakehouse-setup
+
+# Create subdirectories
+mkdir -p spark-jars conf
+
+# Download JAR files (as shown in the main guide)
+# ... (JAR download commands here)
+
+# Make the startup script executable
+chmod +x thrift-server-start.sh
+```
+
+### 2. Start the Services
+
+```bash
+# Start all services
+docker-compose up -d
+
+# Check the status
+docker-compose ps
+
+# Monitor Thrift Server startup (this takes a few minutes)
+docker-compose logs -f spark-thrift-server
+```
+
+### 3. Verify Thrift Server is Running
+
+```bash
+# Check if Thrift Server port is open
+nc -z localhost 10000 && echo "Thrift Server is running" || echo "Thrift Server is not ready"
+
+# Check Spark UI
+curl -s http://localhost:4040 > /dev/null && echo "Spark Application UI is accessible"
+
+# Check Thrift Server logs
+docker-compose logs spark-thrift-server | tail -20
+```
+
+### 4. Test Connection with BeeLine (Spark's SQL CLI)
+
+```bash
+# Connect to Thrift Server using BeeLine
+docker exec -it spark-thrift-server /opt/bitnami/spark/bin/beeline \
+  -u "jdbc:hive2://localhost:10000" \
+  -n spark
+
+# Inside BeeLine, test some commands:
+# 0: jdbc:hive2://localhost:10000> SHOW CATALOGS;
+# 0: jdbc:hive2://localhost:10000> USE CATALOG nessie;
+# 0: jdbc:hive2://localhost:10000> SHOW NAMESPACES;
+# 0: jdbc:hive2://localhost:10000> !quit
+```
+
+### 5. Setup dbt
+
+```bash
+# Install dbt with required dependencies
+pip install dbt-spark[PyHive,JDBC]
+
+# Create dbt project
+dbt init lakehouse_project
+cd lakehouse_project
+
+# Test dbt connection
+dbt debug
+```
+
+### 6. Create Sample Data and Test
+
+```bash
+# First, create some sample data via BeeLine or Spark SQL
+docker exec -it spark-thrift-server /opt/bitnami/spark/bin/spark-sql \
+  --conf spark.sql.catalog.default=nessie \
+  -e "
+  CREATE NAMESPACE IF NOT EXISTS nessie.sample_db;
+  
+  CREATE TABLE IF NOT EXISTS nessie.sample_db.orders (
+      order_id BIGINT,
+      customer_id BIGINT,
+      order_date DATE,
+      amount DECIMAL(10,2)
+  ) USING ICEBERG;
+  
+  INSERT INTO nessie.sample_db.orders VALUES 
+  (1, 101, '2024-01-01', 150.00),
+  (2, 102, '2024-01-02', 200.50),
+  (3, 103, '2024-01-03', 75.25);
+  "
+```
+
+## Key Differences with Thrift Setup
+
+### What the Thrift Server Provides:
+
+1. **JDBC/ODBC Connectivity**: Standard database connection protocol
+2. **Multi-Client Support**: Multiple dbt processes can connect simultaneously  
+3. **Session Persistence**: Maintains connection state between queries
+4. **Better dbt Integration**: More mature integration with dbt-spark adapter
+
+### Architecture Flow:
+
+```
+dbt (localhost) 
+    ↓ JDBC connection (port 10000)
+Spark Thrift Server (container)
+    ↓ Spark SQL queries
+Spark Master/Workers
+    ↓ Read/Write operations  
+Iceberg Tables (MinIO) + Nessie Catalog
+```
+
+### Important Notes:
+
+1. **Startup Time**: Thrift Server takes 1-2 minutes to fully initialize
+2. **Resource Usage**: Requires additional memory (~1-2GB) for the Thrift Server
+3. **Port Forwarding**: Make sure port 10000 is available on your host
+4. **Dependencies**: Thrift Server waits for Spark Master, Nessie, and MinIO to be ready
+
+### Troubleshooting:
+
+```bash
+# If Thrift Server fails to start:
+docker-compose logs spark-thrift-server
+
+# Check if all dependencies are running:
+docker-compose ps
+
+# Restart just the Thrift Server:
+docker-compose restart spark-thrift-server
+
+# Check network connectivity:
+docker exec -it spark-thrift-server nc -z spark-master 7077
+docker exec -it spark-thrift-server nc -z nessie 19120
+docker exec -it spark-thrift-server nc -z minio 9000
+```
+
+This setup provides a more production-like environment where dbt connects to Spark via standard JDBC protocol, similar to how it would connect to traditional data warehouses.
