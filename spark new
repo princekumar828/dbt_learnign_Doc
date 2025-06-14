@@ -1,0 +1,248 @@
+# SOLUTION 1: Download and Add Required JARs to Spark
+# Create jars directory in your docker setup
+
+mkdir -p ./spark-jars
+
+# Download compatible Nessie JARs for Spark 3.5
+cd ./spark-jars
+
+# Core Nessie Iceberg integration (choose version compatible with your setup)
+wget https://repo1.maven.org/maven2/org/projectnessie/nessie/nessie-iceberg/0.77.1/nessie-iceberg-0.77.1.jar
+
+# Nessie client
+wget https://repo1.maven.org/maven2/org/projectnessie/nessie/nessie-client/0.77.1/nessie-client-0.77.1.jar
+
+# Nessie model
+wget https://repo1.maven.org/maven2/org/projectnessie/nessie/nessie-model/0.77.1/nessie-model-0.77.1.jar
+
+# Nessie versioned storage common
+wget https://repo1.maven.org/maven2/org/projectnessie/nessie/nessie-versioned-storage-common/0.77.1/nessie-versioned-storage-common-0.77.1.jar
+
+# Iceberg Nessie catalog (this contains the missing grammar classes)
+wget https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-nessie/1.4.3/iceberg-nessie-1.4.3.jar
+
+# Iceberg Spark runtime
+wget https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.3/iceberg-spark-runtime-3.5_2.12-1.4.3.jar
+
+# AWS SDK for S3A support
+wget https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
+
+# Hadoop AWS
+wget https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar
+
+---
+
+# SOLUTION 2: Update Docker Compose with JAR Mounting
+# docker-compose.yml modifications
+
+version: '3.8'
+
+services:
+  spark-master:
+    image: bitnami/spark:3.5
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/jars-extra  # Mount JARs
+      - ./spark-conf:/opt/bitnami/spark/conf        # Mount config
+    networks:
+      - lakehouse-network
+
+  spark-worker:
+    image: bitnami/spark:3.5
+    container_name: spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=2G
+      - SPARK_EXECUTOR_MEMORY=2G
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/jars-extra  # Mount JARs
+      - ./spark-conf:/opt/bitnami/spark/conf        # Mount config
+    depends_on:
+      - spark-master
+    networks:
+      - lakehouse-network
+
+  spark-thrift-server:
+    image: bitnami/spark:3.5
+    container_name: spark-thrift-server
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "10000:10000"
+      - "4040:4040"
+    volumes:
+      - ./spark-jars:/opt/bitnami/spark/jars-extra  # Mount JARs
+      - ./spark-conf:/opt/bitnami/spark/conf        # Mount config
+    command: >
+      bash -c "
+      /opt/bitnami/spark/sbin/start-thriftserver.sh
+      --master spark://spark-master:7077
+      --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+      --conf spark.sql.catalog.spark_catalog=org.apache.iceberg.spark.SparkSessionCatalog
+      --conf spark.sql.catalog.spark_catalog.type=hive
+      --conf spark.sql.catalog.nessie=org.apache.iceberg.nessie.NessieCatalog
+      --conf spark.sql.catalog.nessie.uri=http://nessie:19120/api/v1
+      --conf spark.sql.catalog.nessie.ref=main
+      --conf spark.sql.catalog.nessie.authentication.type=NONE
+      --conf spark.sql.catalog.nessie.warehouse=s3a://lakehouse/warehouse
+      --conf spark.hadoop.fs.s3a.endpoint=http://minio:9000
+      --conf spark.hadoop.fs.s3a.access.key=minioadmin
+      --conf spark.hadoop.fs.s3a.secret.key=minioadmin
+      --conf spark.hadoop.fs.s3a.path.style.access=true
+      --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+      --jars /opt/bitnami/spark/jars-extra/*.jar
+      && tail -f /dev/null"
+    depends_on:
+      - spark-master
+      - nessie
+      - minio
+    networks:
+      - lakehouse-network
+
+---
+
+# SOLUTION 3: Create Spark Configuration File
+# spark-conf/spark-defaults.conf
+
+# Iceberg Configuration
+spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+spark.sql.catalog.spark_catalog=org.apache.iceberg.spark.SparkSessionCatalog
+spark.sql.catalog.spark_catalog.type=hive
+
+# Nessie Catalog Configuration
+spark.sql.catalog.nessie=org.apache.iceberg.nessie.NessieCatalog
+spark.sql.catalog.nessie.uri=http://nessie:19120/api/v1
+spark.sql.catalog.nessie.ref=main
+spark.sql.catalog.nessie.authentication.type=NONE
+spark.sql.catalog.nessie.warehouse=s3a://lakehouse/warehouse
+
+# S3A Configuration for MinIO
+spark.hadoop.fs.s3a.endpoint=http://minio:9000
+spark.hadoop.fs.s3a.access.key=minioadmin
+spark.hadoop.fs.s3a.secret.key=minioadmin
+spark.hadoop.fs.s3a.path.style.access=true
+spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem
+
+# Serialization
+spark.serializer=org.apache.spark.serializer.KryoSerializer
+
+# Memory settings
+spark.sql.adaptive.enabled=true
+spark.sql.adaptive.coalescePartitions.enabled=true
+
+---
+
+# SOLUTION 4: Version Compatibility Matrix
+# Compatible versions for your setup
+
+# Spark 3.5.x
+# ├── Iceberg 1.4.3 (recommended)
+# ├── Nessie 0.77.1 (latest stable)
+# ├── Hadoop 3.3.4
+# └── AWS SDK 1.12.262
+
+# If you're using different versions, adjust accordingly:
+
+# For Spark 3.4.x:
+# - iceberg-spark-runtime-3.4_2.12-1.4.3.jar
+# - Use same Nessie version
+
+# For Spark 3.3.x:
+# - iceberg-spark-runtime-3.3_2.12-1.4.3.jar
+# - Use same Nessie version
+
+---
+
+# SOLUTION 5: Debug and Verification Commands
+
+# Check if JARs are loaded
+docker exec spark-thrift-server ls -la /opt/bitnami/spark/jars-extra/
+
+# Test Spark SQL connection
+docker exec spark-thrift-server spark-sql --master spark://spark-master:7077 \
+  -e "SHOW CATALOGS;"
+
+# Test Nessie catalog specifically
+docker exec spark-thrift-server spark-sql --master spark://spark-master:7077 \
+  -e "SHOW DATABASES IN nessie;"
+
+# Check for class loading issues
+docker exec spark-thrift-server spark-sql --master spark://spark-master:7077 \
+  -e "SELECT 1;" --conf spark.sql.execution.arrow.pyspark.enabled=false
+
+# Verify dbt connection after fixes
+docker exec dbt-lakehouse dbt debug --profiles-dir /root/.dbt
+
+---
+
+# SOLUTION 6: Alternative - Use Single Uber JAR
+# If multiple JARs cause conflicts, use a single comprehensive JAR
+
+# Download Iceberg Spark bundle (includes most dependencies)
+wget https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/1.4.3/iceberg-spark-runtime-3.5_2.12-1.4.3.jar
+
+# And only the specific Nessie catalog JAR
+wget https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-nessie/1.4.3/iceberg-nessie-1.4.3.jar
+
+---
+
+# SOLUTION 7: Restart Sequence After Fixes
+
+# Stop all services
+docker-compose down
+
+# Remove any cached data that might cause issues
+docker system prune -f
+
+# Start services in order
+docker-compose up -d nessie minio
+sleep 30
+
+docker-compose up -d spark-master
+sleep 10
+
+docker-compose up -d spark-worker spark-thrift-server
+sleep 30
+
+# Test the connection
+docker exec dbt-lakehouse dbt debug
+
+# If debug passes, try seed
+docker exec dbt-lakehouse dbt seed --select customers
+
+---
+
+# TROUBLESHOOTING CHECKLIST
+
+# 1. Verify JAR presence
+ls -la ./spark-jars/
+
+# 2. Check Spark logs for ClassLoader issues
+docker logs spark-thrift-server | grep -i "classnotfound\|noclassdef"
+
+# 3. Verify Nessie is accessible
+curl http://localhost:19120/api/v1/config
+
+# 4. Test basic Spark functionality
+docker exec spark-thrift-server spark-sql -e "SELECT 1;"
+
+# 5. Check dbt connection details
+docker exec dbt-lakehouse dbt debug --profiles-dir /root/.dbt
