@@ -1,0 +1,9 @@
+https://docs.starburst.io/blog/2022-11-30-dbt0-introduction.html
+
+https://blog.devgenius.io/building-an-end-to-end-data-lake-elt-pipeline-using-modern-data-stack-9588d9e51b0e
+
+https://www.youtube.com/watch?v=Q3qb93fuQAA
+
+https://viewer.diagrams.net/?tags=%7B%7D&lightbox=1&highlight=0000ff&edit=_blank&layers=1&nav=1&dark=auto#G1HLhw6Kc2BXnskBrTVUpz8dtAhltL8POf
+
+https://www.oreilly.com/library/view/analytics-engineering-with/9781098142377/ch04.html
