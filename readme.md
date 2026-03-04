@@ -2,7 +2,7 @@ LakeHouse Learning Git Repository
 
 This repository is dedicated to my transformation and cement-clear journey in building an Iceberg Lakehouse architecture.
 
-## Components
+## Components done
 
 - **Table Format:** [Apache Iceberg](https://iceberg.apache.org/)
 - **Storage:** [MinIO](https://min.io/)
